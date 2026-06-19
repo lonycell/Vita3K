@@ -26,7 +26,9 @@
 #include <dynarmic/interface/A32/coprocessor.h>
 #include <dynarmic/interface/exclusive_monitor.h>
 
+#include <atomic>
 #include <bit>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <string>
@@ -249,6 +251,19 @@ public:
         auto result = Ptr<T>(addr).atomic_compare_and_swap(*parent->mem, value, expected);
         if (cpu->log_mem) {
             LOG_TRACE("Write uint{}_t at addr: 0x{:x}, val = 0x{:x}, expected = 0x{:x}", sizeof(T) * 8, addr, value, expected);
+        }
+        // [Spin trace, opt-in via V3K_SPIN_TRACE] A failing exclusive write (CAS) is a
+        // stuck atomic spin. Rate-limited dump of the polled address + comparand reveals
+        // the C# flag Unity_main waits on (see NP-RE-FINDINGS.md §8.3.4). Use a
+        // thread_local counter (no shared atomic) to avoid cross-thread contention that
+        // would slow GC-heavy scene loading to a crawl.
+        static const bool trace_excl = std::getenv("V3K_SPIN_TRACE") != nullptr;
+        if (trace_excl && !result) {
+            thread_local uint64_t n = 0;
+            if ((n++ & 0x3FFFFu) == 0) {
+                const T actual = *Ptr<T>(addr).get(*parent->mem);
+                LOG_INFO("[EXCL-FAIL] tid={} addr=0x{:08X} sz={} want=0x{:X} expected=0x{:X} actual=0x{:X}", parent->thread_id, addr, (int)(sizeof(T) * 8), (uint64_t)value, (uint64_t)expected, (uint64_t)actual);
+            }
         }
         return result;
     }

@@ -36,8 +36,12 @@
 #include <self.h>
 
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
+#include <thread>
+#include <vector>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -265,6 +269,8 @@ static bool load_func_exports(SceKernelModuleInfo *kernel_module_info, const uin
         }
 
         kernel.export_nids.emplace(nid, entry.address());
+        if (std::getenv("V3K_LOG_EXPORTS"))
+            LOG_INFO("[EXPORT] {} NID 0x{:08X} -> 0x{:08X}", kernel_module_info->module_name, nid, entry.address());
         // substitute supervisor calls to direct function calls in loaded modules
         auto range = kernel.func_binding_infos.equal_range(nid);
         for (auto it = range.first; it != range.second; ++it) {
@@ -701,6 +707,191 @@ SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std
 
     for (const auto &[seg, infos] : segment_reloc_info) {
         LOG_INFO("Loaded module segment {} @ [0x{:08X} - 0x{:08X} / 0x{:08X}] (size: 0x{:08X}) of module {}", seg, infos.addr, infos.addr + infos.size, infos.p_vaddr, infos.size, self_path);
+    }
+
+    // [NP readiness experiment, opt-in via V3K_NP_READY_PATCH]
+    // The Unity NP Toolkit dispatcher FUN_80f4162e fires the C#-side "NP ready"
+    // delegate (FUN_80f1f632) only when a type-0/sub-0 event is dispatched AND the
+    // NP-manager object's net-state field (+0x74) is non-zero. Running offline with no
+    // NP service daemon that readiness path is never reached, so the game never leaves
+    // the loading screen (see build-man/NP-RE-FINDINGS.md §8).
+    //
+    // Experiment A: force the dispatcher to ALWAYS take the readiness path (code 1) for
+    // any event it processes. Three 2-byte patches (offsets relative to the dumped ELF
+    // seg0 vaddr 0x80F08000; applied at load time before any toolkit code is JIT'd):
+    //   0x3964e: beq 0x80f4173e (76 d0) -> b 0x80f4173e (76 e0)  [always type-0 path]
+    //   0x39742: bne 0x80f417a4 (2f d1) -> nop          (00 bf)  [don't skip on sub!=0]
+    //   0x39774: ldr r1,[r5,#0x74] (69 6f) -> movs r1,#3 (03 21) [force net-state=3]
+    if (std::getenv("V3K_NP_READY_PATCH")) {
+        const auto seg0_it = segment_reloc_info.find(0);
+        if (seg0_it != segment_reloc_info.end() && std::strncmp(module_info->name, "UnityNpToolkit", 28) == 0) {
+            const uint32_t seg0 = seg0_it->second.addr;
+            struct BytePatch {
+                uint32_t off;
+                uint8_t expect[2];
+                uint8_t patch[2];
+                const char *desc;
+            };
+            // Experiment B (env V3K_NP_READY_PATCH=2): also force the Toolkit::NP worker
+            // FUN_80f420a2 to dispatch even when its event queue is empty. The dispatch is
+            // gated by `if (piVar10[5]!=0) beq 0x80f4241e` at 0x80f423cc. Redirect that
+            // branch to 0x80f4240c (the dispatch-prep that calls FUN_80f4162e with the
+            // on-stack buffer), skipping the ring-buffer dequeue so no bad-pointer deref.
+            // With Experiment A's patches the dispatcher ignores event content and fires
+            // the readiness delegate. Tests whether forcing readiness unblocks C# at all.
+            const bool exp_b = std::strcmp(std::getenv("V3K_NP_READY_PATCH"), "2") == 0;
+            // readiness code sweep: force net-state field (+0x74) to N via `movs r1,#N`.
+            // N=3 -> readiness code 1 (online), N=1 -> code 0, N=2 -> code -1 (0xffffffff).
+            uint8_t ns = 3;
+            if (const char *e = std::getenv("V3K_NP_READY_NS")) {
+                const int v = std::atoi(e);
+                if (v >= 1 && v <= 7)
+                    ns = static_cast<uint8_t>(v);
+            }
+            // optionally also force the +0x73 code-2 send (cbz r0 at 0x80f41798 -> nop)
+            const bool force_c2 = std::getenv("V3K_NP_READY_C2") != nullptr;
+            const BytePatch patches_a[] = {
+                { 0x3964e, { 0x76, 0xd0 }, { 0x76, 0xe0 }, "always-type0" },
+                { 0x39742, { 0x2f, 0xd1 }, { 0x00, 0xbf }, "ignore-subtype" },
+                { 0x39774, { 0x69, 0x6f }, { ns, 0x21 }, "force-netstate" },
+            };
+            const BytePatch patch_b = { 0x3a3cc, { 0x27, 0xd0 }, { 0x1e, 0xe0 }, "force-dispatch" };
+            const BytePatch patch_c2 = { 0x39798, { 0x20, 0xb1 }, { 0x00, 0xbf }, "force-code2" };
+            std::vector<BytePatch> patches(std::begin(patches_a), std::end(patches_a));
+            if (exp_b)
+                patches.push_back(patch_b);
+            if (force_c2)
+                patches.push_back(patch_c2);
+            for (const auto &bp : patches) {
+                uint8_t *p = Ptr<uint8_t>(seg0 + bp.off).get(mem);
+                if (p[0] == bp.expect[0] && p[1] == bp.expect[1]) {
+                    p[0] = bp.patch[0];
+                    p[1] = bp.patch[1];
+                    LOG_INFO("[NP-READY-PATCH] {} @0x{:08X}: {:02x} {:02x} -> {:02x} {:02x}", bp.desc, seg0 + bp.off, bp.expect[0], bp.expect[1], bp.patch[0], bp.patch[1]);
+                } else {
+                    LOG_WARN("[NP-READY-PATCH] {} @0x{:08X}: unexpected {:02x} {:02x}; not patching", bp.desc, seg0 + bp.off, p[0], p[1]);
+                }
+            }
+        }
+    }
+
+    // [NP message injection, opt-in via V3K_NP_MSG_INJECT] (see NP-RE-FINDINGS.md §10)
+    // Deliver one synthetic kNPToolKit_NPInitialized (PluginMessage.type=4) so managed
+    // Sony.NP.Main.PumpMessages fires OnNPInitialized -> SceneFirst._NpReady=true -> the
+    // game leaves the "checking system data" loading screen. The native toolkit never
+    // enqueues this message (its init readiness never completes). Patch the toolkit's
+    // native message-queue exports in-place (each export is larger than the replacement),
+    // using a one-shot flag byte in seg1 BSS so exactly one message is delivered:
+    //   PrxHasMessage      (off 0x5EF8): r0 = (flag==0) ? 1 : 0
+    //   PrxGetFirstMessage (off 0x5F76, r0=&msg): *(u32*)r0 = 4; flag = 1; return
+    //   PrxRemoveFirstMessage (off 0x604A): bx lr (no-op; real queue unused offline)
+    // The Sony Unity plugins (UnityNpToolkit, ScreenShots, SavedGames) each export the SAME
+    // generic Prx message-queue NIDs (HasMessage 0xB84EBFDC, GetFirstMessage 0x7DF8200B,
+    // RemoveFirstMessage 0xBE0F7811). Managed P/Invoke binding may resolve to whichever module
+    // registered the NID first (export_nids is first-wins), NOT necessarily the named target.
+    // So instrument BOTH UnityNpToolkit and ScreenShots: count calls + deliver a one-shot
+    // PluginMessage.type=4 (kNPToolKit_NPInitialized) on GetFirstMessage. The scratch (flag +
+    // 2 call counters) lives in the patched function's own dead code tail (seg0, writable).
+    static uint32_t s_np_ss_scratch = 0; // ScreenShots scratch addr, read by the NP poller
+    if (std::getenv("V3K_NP_MSG_INJECT")) {
+        // literal-pool offset for `ldr rX,[pc,#12]` placed at instr_off inside a fn at vaddr base
+        auto litoff = [](uint32_t base, uint32_t instr_off) -> uint32_t {
+            const uint32_t pc = (base + instr_off + 4) & ~3u;
+            return (pc + 12) - base;
+        };
+        auto patch_prx = [&](uint32_t has_a, uint32_t get_a, uint32_t rem_a, uint32_t scratch, const char *tag) -> bool {
+            uint8_t *has = Ptr<uint8_t>(has_a).get(mem);
+            uint8_t *get = Ptr<uint8_t>(get_a).get(mem);
+            if (!(has[0] == 0x70 && has[1] == 0xb5 && get[0] == 0x70 && get[1] == 0xb5)) {
+                LOG_WARN("[NP-MSG-INJECT] {}: unexpected prologue has={:02x}{:02x} get={:02x}{:02x}; skip", tag, has[0], has[1], get[0], get[1]);
+                return false;
+            }
+            memset(Ptr<uint8_t>(scratch).get(mem), 0, 16);
+            // HasMessage: r0=&scratch; ++scratch[+4]; return (scratch[0]==0)?1:0
+            // ldr r0,[pc,#12]; ldr r1,[r0,#4]; adds r1,#1; str r1,[r0,#4]; ldrb r0,[r0]; movs r1,#1; eors r0,r1; bx lr
+            const uint8_t hcode[] = { 0x03, 0x48, 0x41, 0x68, 0x01, 0x31, 0x41, 0x60,
+                0x00, 0x78, 0x01, 0x21, 0x48, 0x40, 0x70, 0x47 };
+            memcpy(has, hcode, sizeof(hcode));
+            memcpy(has + litoff(has_a, 0), &scratch, 4);
+            // GetFirstMessage(r0=&msg): msg.type=4; scratch[0]=1; ++scratch[+8]
+            // movs r1,#4; str r1,[r0]; ldr r3,[pc,#12]; movs r1,#1; strb r1,[r3]; ldr r1,[r3,#8]; adds r1,#1; str r1,[r3,#8]; bx lr
+            const uint8_t gcode[] = { 0x04, 0x21, 0x01, 0x60, 0x03, 0x4b, 0x01, 0x21,
+                0x19, 0x70, 0x99, 0x68, 0x01, 0x31, 0x99, 0x60, 0x70, 0x47 };
+            memcpy(get, gcode, sizeof(gcode));
+            memcpy(get + litoff(get_a, 4), &scratch, 4);
+            if (rem_a) {
+                uint8_t *rem = Ptr<uint8_t>(rem_a).get(mem);
+                rem[0] = 0x70; // bx lr (no-op)
+                rem[1] = 0x47;
+            }
+            LOG_INFO("[NP-MSG-INJECT] {}: patched has=0x{:08X} get=0x{:08X} scratch=0x{:08X}", tag, has_a, get_a, scratch);
+            return true;
+        };
+        const auto s0 = segment_reloc_info.find(0);
+        if (s0 != segment_reloc_info.end() && std::strncmp(module_info->name, "ScreenShots", 12) == 0) {
+            const uint32_t b = s0->second.addr;
+            s_np_ss_scratch = b + 0x658;
+            patch_prx(b + 0x644, b + 0x694 /*real impl behind veneer*/, b + 0x7DC, b + 0x658, "ScreenShots");
+        }
+        if (s0 != segment_reloc_info.end() && std::strncmp(module_info->name, "UnityNpToolkit", 28) == 0) {
+            const uint32_t b = s0->second.addr;
+            const uint32_t scratch = b + 0x5F0C;
+            patch_prx(b + 0x5EF8, b + 0x5F76, b + 0x604A, scratch, "UnityNpToolkit");
+            // Poller: report whether either module's patched exports actually execute.
+            MemState *mp = &mem;
+            std::thread([mp, scratch]() {
+                for (int i = 0; i < 25; ++i) {
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    auto u8 = [&](uint32_t a) { return *Ptr<uint8_t>(a).get(*mp); };
+                    auto u32 = [&](uint32_t a) { return *Ptr<uint32_t>(a).get(*mp); };
+                    const uint32_t ss = s_np_ss_scratch;
+                    LOG_INFO("[NP-MSG-INJECT] t={}s NP[flag={} has={} get={}] SS[flag={} has={} get={}]",
+                        (i + 1) * 2, u8(scratch), u32(scratch + 4), u32(scratch + 8),
+                        ss ? u8(ss) : 0, ss ? u32(ss + 4) : 0, ss ? u32(ss + 8) : 0);
+                }
+            }).detach();
+        }
+    }
+
+    // [Spin trace, opt-in via V3K_SPIN_TRACE] Diagnose the Mono-JIT'd C# atomic spin in
+    // Unity_main_thread (see NP-RE-FINDINGS.md §8.3.4): dump its guest PC + registers +
+    // the code bytes around PC at intervals, so the LDREX/CAS target address can be found.
+    if (std::getenv("V3K_SPIN_TRACE") && std::strncmp(module_info->name, "UnityNpToolkit", 28) == 0) {
+        KernelState *kp = &kernel;
+        MemState *mp = &mem;
+        std::thread([kp, mp]() {
+            std::this_thread::sleep_for(std::chrono::seconds(14));
+            for (int iter = 0; iter < 6; ++iter) {
+                ThreadStatePtr ut;
+                {
+                    const std::lock_guard<std::mutex> g(kp->mutex);
+                    for (const auto &[id, t] : kp->threads) {
+                        if (t && t->name == "Unity_main_thread") {
+                            ut = t;
+                            break;
+                        }
+                    }
+                }
+                if (ut && ut->cpu) {
+                    CPUState &c = *ut->cpu;
+                    const uint32_t pc = read_pc(c);
+                    std::string regs;
+                    for (int r = 0; r <= 12; ++r)
+                        regs += fmt::format("r{}=0x{:08X} ", r, read_reg(c, r));
+                    LOG_INFO("[SPIN-TRACE {}] pc=0x{:08X} sp=0x{:08X} lr=0x{:08X} {}", iter, pc, read_sp(c), read_lr(c), regs);
+                    const uint32_t base = (pc & ~1u) - 24;
+                    std::string code;
+                    for (uint32_t a = base; a < base + 56; a += 2) {
+                        const Ptr<uint16_t> hw(a);
+                        if (hw && hw.valid(*mp))
+                            code += fmt::format("{:04x}@{:08X} ", *hw.get(*mp), a);
+                    }
+                    LOG_INFO("[SPIN-TRACE {}] code: {}", iter, code);
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+            }
+            LOG_INFO("[SPIN-TRACE] done");
+        }).detach();
     }
 
     const SceKernelModulePtr kernelModuleInfo = std::make_shared<KernelModule>();
