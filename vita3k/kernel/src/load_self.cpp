@@ -36,6 +36,7 @@
 #include <self.h>
 
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -130,9 +131,9 @@ static bool load_func_imports(const uint32_t *nids, const Ptr<uint32_t> *entries
         const uint32_t nid = nids[i];
         const Ptr<uint32_t> entry = entries[i];
 
-        if (kernel.debugger.log_imports) {
+        if (kernel.debugger.log_imports || std::getenv("V3K_LOG_IMPORTS")) {
             const char *const name = import_name(nid);
-            LOG_DEBUG("\tNID {} ({}) at {}", log_hex(nid), name, log_hex(entry.address()));
+            LOG_INFO("\tNID {} ({}) at {}", log_hex(nid), name, log_hex(entry.address()));
         }
 
         const ExportNids::iterator export_address = kernel.export_nids.find(nid);
@@ -212,7 +213,7 @@ static bool load_imports(const sce_module_info_raw &module, Ptr<const void> segm
         }
 
         std::string lib_name;
-        if (kernel.debugger.log_imports) {
+        if (kernel.debugger.log_imports || std::getenv("V3K_LOG_IMPORTS")) {
             lib_name = Ptr<const char>(library_name).get(mem);
             LOG_INFO("Loading func imports from {}", lib_name);
         }
@@ -656,7 +657,7 @@ SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std
         }
     }
 
-    if (kernel.debugger.dump_elfs) {
+    if (kernel.debugger.dump_elfs || std::getenv("V3K_DUMP_ELFS")) {
         const uint8_t *dump_begin = is_self ? (image_bytes + self_header.header_len) : elf_bytes;
         const uint8_t *dump_end;
 

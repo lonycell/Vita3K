@@ -2063,6 +2063,16 @@ NID(_ZN4IPMI6Client7connectEPKvjPi, 0xA22C3E01)
 NID(_ZN4IPMI6Client7destroyEv, 0x101C93F8)
 NID(_ZN4IPMI6Client9tryGetMsgEjPvPmm, 0x60EFADE7)
 NID(_ZN4IPMI6ClientD1Ev, 0xA5AA193C)
+NID(SceIpmi_22625598, 0x22625598)
+NID(SceIpmi_296D44D4, 0x296D44D4)
+NID(SceIpmi_9EE9496B, 0x9EE9496B)
+NID(SceIpmi_B56BAC7F, 0xB56BAC7F)
+NID(SceIpmi_B943F5D9, 0xB943F5D9)
+NID(SceIpmi_D73C03D2, 0xD73C03D2)
+NID(SceIpmi_BC3A3031, 0xBC3A3031)
+NID(SceIpmi_2C6DB642, 0x2C6DB642)
+NID(SceIpmi_006EFA9D, 0x006EFA9D)
+NID(SceIpmi_A20BB95B, 0xA20BB95B)
 // Module "SceIncomingDialog"
 // Library "SceIncomingDialog"
 NID(sceIncomingDialogClose, 0x126BD15E)
@@ -6127,6 +6137,7 @@ NID(sceKernelRegisterProcessTerminationCallback, 0x5EC77870)
 NID(sceKernelUnregisterProcessTerminationCallback, 0x973A4527)
 // Library "SceProcessmgrForDriver"
 NID(ksceKernelCreateProcessLocalStorage, 0x3801D7D6)
+NID(SceProcessmgrForDriver_D141C076, 0xD141C076)
 NID(ksceKernelGetProcessInfo, 0x0AFF3EAE)
 NID(ksceKernelGetProcessLocalStorageAddr, 0xEE694840)
 NID(ksceKernelGetProcessLocalStorageAddrForPid, 0xAF80F39C)
@@ -6603,6 +6614,8 @@ NID(sceShaccCgSetDefaultAllocator, 0x6F01D573)
 // Module "SceShellSvc"
 // Library "SceShellSvc"
 NID(sceShellSvcGetSvcObj, 0xB31E7F1C)
+NID(SceShellSvc_D943CE15, 0xD943CE15)
+NID(SceShellSvc_FB03FBC9, 0xFB03FBC9)
 // Library "SceShellUtil"
 NID(sceShellUtilInitEvents, 0xE8AD11EC)
 NID(sceShellUtilLock, 0xA9537233)

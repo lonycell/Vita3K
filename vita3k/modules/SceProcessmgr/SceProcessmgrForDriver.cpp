@@ -86,3 +86,8 @@ EXPORT(int, ksceKernelFreeRemoteProcessHeap, SceUID pid, Ptr<void> ptr) {
     STUBBED("ksceKernelFreeRemoteProcessHeap");
     return 0;
 }
+
+// Imported by the real (LLE) np_manager during NP service setup.
+EXPORT(int, SceProcessmgrForDriver_D141C076) {
+    return STUBBED("SceProcessmgrForDriver_D141C076 -> success");
+}

@@ -34,3 +34,13 @@ EXPORT(int, sceShellSvcGetSvcObj) {
     STUBBED("STUBBED");
     return svc_client.address();
 }
+
+// Imported by the real (LLE) np_manager during NP service setup.
+EXPORT(int, SceShellSvc_D943CE15) {
+    return STUBBED("SceShellSvc_D943CE15 -> success");
+}
+
+// Imported by the real (LLE) np_manager NP worker thread (post trophy setup).
+EXPORT(int, SceShellSvc_FB03FBC9) {
+    return STUBBED("SceShellSvc_FB03FBC9 -> success");
+}
