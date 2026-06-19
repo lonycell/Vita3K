@@ -775,81 +775,60 @@ SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std
         }
     }
 
-    // [NP message injection, opt-in via V3K_NP_MSG_INJECT] (see NP-RE-FINDINGS.md §10)
-    // Deliver one synthetic kNPToolKit_NPInitialized (PluginMessage.type=4) so managed
-    // Sony.NP.Main.PumpMessages fires OnNPInitialized -> SceneFirst._NpReady=true -> the
-    // game leaves the "checking system data" loading screen. The native toolkit never
-    // enqueues this message (its init readiness never completes). Patch the toolkit's
-    // native message-queue exports in-place (each export is larger than the replacement),
-    // using a one-shot flag byte in seg1 BSS so exactly one message is delivered:
-    //   PrxHasMessage      (off 0x5EF8): r0 = (flag==0) ? 1 : 0
-    //   PrxGetFirstMessage (off 0x5F76, r0=&msg): *(u32*)r0 = 4; flag = 1; return
-    //   PrxRemoveFirstMessage (off 0x604A): bx lr (no-op; real queue unused offline)
-    // The Sony Unity plugins (UnityNpToolkit, ScreenShots, SavedGames) each export the SAME
-    // generic Prx message-queue NIDs (HasMessage 0xB84EBFDC, GetFirstMessage 0x7DF8200B,
-    // RemoveFirstMessage 0xBE0F7811). Managed P/Invoke binding may resolve to whichever module
-    // registered the NID first (export_nids is first-wins), NOT necessarily the named target.
-    // So instrument BOTH UnityNpToolkit and ScreenShots: count calls + deliver a one-shot
-    // PluginMessage.type=4 (kNPToolKit_NPInitialized) on GetFirstMessage. The scratch (flag +
-    // 2 call counters) lives in the patched function's own dead code tail (seg0, writable).
-    static uint32_t s_np_ss_scratch = 0; // ScreenShots scratch addr, read by the NP poller
+    // [NP message injection, opt-in via V3K_NP_MSG_INJECT] (see NP-RE-FINDINGS.md §10-11)
+    // Offline NP never completes init, so Sony.NP.Main.PumpMessages never receives the
+    // kNPToolKit_NPInitialized (PluginMessage.type=4) message that sets SceneFirst._NpReady,
+    // leaving the game stuck on the "checking system data" loading screen. Deliver exactly one
+    // synthetic type=4 message by patching the native Prx message-queue exports in-place:
+    //   PrxHasMessage         -> return (flag==0) ? 1 : 0   (true once, then false)
+    //   PrxGetFirstMessage(r0=&msg) -> msg.type = 4; flag = 1
+    //   PrxRemoveFirstMessage -> bx lr (no-op; the real queue is unused offline)
+    // The one-shot flag lives in the patched HasMessage's own dead code tail (seg0, writable).
+    //
+    // These generic Prx NIDs (HasMessage 0xB84EBFDC, GetFirstMessage 0x7DF8200B, Remove
+    // 0xBE0F7811) are exported by EVERY Sony Unity plugin (UnityNpToolkit, ScreenShots,
+    // SavedGames). Vita3K's export_nids is first-wins, so managed P/Invoke actually binds to the
+    // FIRST-loaded exporter (ScreenShots), not the named UnityNpToolkit — confirmed at runtime
+    // (§11.1). Patch both so the fix lands regardless of load order; the unused copy is harmless.
     if (std::getenv("V3K_NP_MSG_INJECT")) {
-        // literal-pool offset for `ldr rX,[pc,#12]` placed at instr_off inside a fn at vaddr base
+        // Literal-pool offset for `ldr rX,[pc,#12]` placed at instr_off inside a fn at vaddr base.
         auto litoff = [](uint32_t base, uint32_t instr_off) -> uint32_t {
             const uint32_t pc = (base + instr_off + 4) & ~3u;
             return (pc + 12) - base;
         };
-        auto patch_prx = [&](uint32_t has_a, uint32_t get_a, uint32_t rem_a, uint32_t scratch, const char *tag) -> bool {
+        auto patch_prx = [&](uint32_t has_a, uint32_t get_a, uint32_t rem_a, const char *tag) -> bool {
             uint8_t *has = Ptr<uint8_t>(has_a).get(mem);
             uint8_t *get = Ptr<uint8_t>(get_a).get(mem);
             if (!(has[0] == 0x70 && has[1] == 0xb5 && get[0] == 0x70 && get[1] == 0xb5)) {
                 LOG_WARN("[NP-MSG-INJECT] {}: unexpected prologue has={:02x}{:02x} get={:02x}{:02x}; skip", tag, has[0], has[1], get[0], get[1]);
                 return false;
             }
-            memset(Ptr<uint8_t>(scratch).get(mem), 0, 16);
-            // HasMessage: r0=&scratch; ++scratch[+4]; return (scratch[0]==0)?1:0
-            // ldr r0,[pc,#12]; ldr r1,[r0,#4]; adds r1,#1; str r1,[r0,#4]; ldrb r0,[r0]; movs r1,#1; eors r0,r1; bx lr
-            const uint8_t hcode[] = { 0x03, 0x48, 0x41, 0x68, 0x01, 0x31, 0x41, 0x60,
-                0x00, 0x78, 0x01, 0x21, 0x48, 0x40, 0x70, 0x47 };
+            const uint32_t flag = has_a + 20; // one-shot flag, 4-aligned, in HasMessage's dead tail
+            *Ptr<uint32_t>(flag).get(mem) = 0;
+            // HasMessage: ldr r0,[pc,#12]; ldrb r0,[r0]; movs r1,#1; eors r0,r1; bx lr
+            const uint8_t hcode[] = { 0x03, 0x48, 0x00, 0x78, 0x01, 0x21, 0x48, 0x40, 0x70, 0x47 };
             memcpy(has, hcode, sizeof(hcode));
-            memcpy(has + litoff(has_a, 0), &scratch, 4);
-            // GetFirstMessage(r0=&msg): msg.type=4; scratch[0]=1; ++scratch[+8]
-            // movs r1,#4; str r1,[r0]; ldr r3,[pc,#12]; movs r1,#1; strb r1,[r3]; ldr r1,[r3,#8]; adds r1,#1; str r1,[r3,#8]; bx lr
-            const uint8_t gcode[] = { 0x04, 0x21, 0x01, 0x60, 0x03, 0x4b, 0x01, 0x21,
-                0x19, 0x70, 0x99, 0x68, 0x01, 0x31, 0x99, 0x60, 0x70, 0x47 };
+            memcpy(has + litoff(has_a, 0), &flag, 4);
+            // GetFirstMessage(r0=&msg): movs r1,#4; str r1,[r0]; ldr r3,[pc,#12]; movs r1,#1; strb r1,[r3]; bx lr
+            const uint8_t gcode[] = { 0x04, 0x21, 0x01, 0x60, 0x03, 0x4b, 0x01, 0x21, 0x19, 0x70, 0x70, 0x47 };
             memcpy(get, gcode, sizeof(gcode));
-            memcpy(get + litoff(get_a, 4), &scratch, 4);
+            memcpy(get + litoff(get_a, 4), &flag, 4);
             if (rem_a) {
                 uint8_t *rem = Ptr<uint8_t>(rem_a).get(mem);
                 rem[0] = 0x70; // bx lr (no-op)
                 rem[1] = 0x47;
             }
-            LOG_INFO("[NP-MSG-INJECT] {}: patched has=0x{:08X} get=0x{:08X} scratch=0x{:08X}", tag, has_a, get_a, scratch);
+            LOG_INFO("[NP-MSG-INJECT] {}: patched Prx{{HasMessage,GetFirstMessage,RemoveFirstMessage}} (has=0x{:08X} get=0x{:08X})", tag, has_a, get_a);
             return true;
         };
         const auto s0 = segment_reloc_info.find(0);
         if (s0 != segment_reloc_info.end() && std::strncmp(module_info->name, "ScreenShots", 12) == 0) {
             const uint32_t b = s0->second.addr;
-            s_np_ss_scratch = b + 0x658;
-            patch_prx(b + 0x644, b + 0x694 /*real impl behind veneer*/, b + 0x7DC, b + 0x658, "ScreenShots");
+            patch_prx(b + 0x644, b + 0x694 /*real impl behind veneer*/, b + 0x7DC, "ScreenShots");
         }
         if (s0 != segment_reloc_info.end() && std::strncmp(module_info->name, "UnityNpToolkit", 28) == 0) {
             const uint32_t b = s0->second.addr;
-            const uint32_t scratch = b + 0x5F0C;
-            patch_prx(b + 0x5EF8, b + 0x5F76, b + 0x604A, scratch, "UnityNpToolkit");
-            // Poller: report whether either module's patched exports actually execute.
-            MemState *mp = &mem;
-            std::thread([mp, scratch]() {
-                for (int i = 0; i < 25; ++i) {
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
-                    auto u8 = [&](uint32_t a) { return *Ptr<uint8_t>(a).get(*mp); };
-                    auto u32 = [&](uint32_t a) { return *Ptr<uint32_t>(a).get(*mp); };
-                    const uint32_t ss = s_np_ss_scratch;
-                    LOG_INFO("[NP-MSG-INJECT] t={}s NP[flag={} has={} get={}] SS[flag={} has={} get={}]",
-                        (i + 1) * 2, u8(scratch), u32(scratch + 4), u32(scratch + 8),
-                        ss ? u8(ss) : 0, ss ? u32(ss + 4) : 0, ss ? u32(ss + 8) : 0);
-                }
-            }).detach();
+            patch_prx(b + 0x5EF8, b + 0x5F76, b + 0x604A, "UnityNpToolkit");
         }
     }
 
