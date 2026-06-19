@@ -29,6 +29,12 @@
 
 namespace renderer::vulkan {
 
+// Some devices (e.g. Metal on Intel/AMD Macs) do not support the packed 16-bit
+// RGB formats (R5G6B5 / A1R5G5B5 / R4G4B4A4). When unsupported we transparently
+// fall back to a supported 16-bit format (RG8, same byte size) so the emulator
+// keeps running instead of aborting on image creation. Set once at device creation.
+void set_packed16_support(bool supported);
+
 vk::Format translate_attribute_format(SceGxmAttributeFormat format, unsigned int component_count, bool is_integer, bool is_signed);
 vk::BlendFactor translate_blend_factor(const SceGxmBlendFactor blend_factor);
 vk::BlendOp translate_blend_func(const SceGxmBlendFunc blend_func);

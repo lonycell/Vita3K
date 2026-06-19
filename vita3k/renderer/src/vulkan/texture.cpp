@@ -303,6 +303,22 @@ bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &tex
     const vk::FormatProperties astc_support = state.physical_device.getFormatProperties(vk::Format::eAstc4x4SrgbBlock);
     support_astc = static_cast<bool>(astc_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
 
+    // check for packed 16-bit RGB format support (R5G6B5 / A1R5G5B5 / R4G4B4A4).
+    // Metal only exposes these on Apple-family GPUs, so Intel/AMD Macs report them
+    // as unsupported. When any is missing we fall back to a 16-bit format in
+    // gxm_to_vulkan so image creation does not abort.
+    const auto packed16_ok = [&](vk::Format fmt) {
+        const vk::FormatProperties props = state.physical_device.getFormatProperties(fmt);
+        return static_cast<bool>(props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage)
+            && static_cast<bool>(props.optimalTilingFeatures & vk::FormatFeatureFlagBits::eColorAttachment);
+    };
+    const bool support_packed16 = packed16_ok(vk::Format::eR5G6B5UnormPack16)
+        && packed16_ok(vk::Format::eR4G4B4A4UnormPack16)
+        && packed16_ok(vk::Format::eA1R5G5B5UnormPack16);
+    set_packed16_support(support_packed16);
+    if (!support_packed16)
+        LOG_INFO("Device does not support packed 16-bit RGB formats; using a 16-bit RG8 fallback for U5U6U5/U4U4U4U4/U1U5U5U5 surfaces and textures");
+
     return true;
 }
 

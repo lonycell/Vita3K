@@ -22,6 +22,18 @@
 
 namespace renderer::vulkan {
 
+// Whether the physical device supports the packed 16-bit RGB formats
+// (R5G6B5 / A1R5G5B5 / R4G4B4A4). Defaults to true; overridden at device
+// creation (see set_packed16_support). On Metal/MoltenVK these packed formats
+// are only available on Apple-family GPUs, so Intel/AMD Macs report them as
+// unsupported and we substitute a 16-bit fallback of the same byte size (RG8)
+// to avoid any stride/size mismatch while keeping the emulator running.
+static bool s_support_packed16 = true;
+
+void set_packed16_support(bool supported) {
+    s_support_packed16 = supported;
+}
+
 vk::Format translate_attribute_format(SceGxmAttributeFormat format, unsigned int component_count, bool is_integer, bool is_signed) {
     if (component_count == 0 || component_count > 4 || format > SCE_GXM_ATTRIBUTE_FORMAT_UNTYPED)
         LOG_ERROR("Unsupported attribute format {}x{}", log_hex(format), component_count);
@@ -449,7 +461,8 @@ vk::Format translate_format(SceGxmColorBaseFormat format) {
 
     // packed formats
     case SCE_GXM_COLOR_BASE_FORMAT_U5U6U5:
-        return vk::Format::eR5G6B5UnormPack16;
+        // RG8 fallback (same 16-bit size) when the device lacks RGB565 (e.g. Intel/AMD Macs)
+        return s_support_packed16 ? vk::Format::eR5G6B5UnormPack16 : vk::Format::eR8G8Unorm;
     case SCE_GXM_COLOR_BASE_FORMAT_F11F11F10:
         return vk::Format::eB10G11R11UfloatPack32;
     case SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9:
@@ -461,9 +474,11 @@ vk::Format translate_format(SceGxmColorBaseFormat format) {
     case SCE_GXM_COLOR_BASE_FORMAT_U1U5U5U5:
         // TODO: we must use either eR5G5B5A1UnormPack16 or eA1R5G5B5UnormPack16 depending on the swizzle
         // also eR5G5B5A1UnormPack16 is not supported on all GPUs...
-        return vk::Format::eA1R5G5B5UnormPack16;
+        // RG8 fallback (same 16-bit size) when the device lacks packed 16-bit formats
+        return s_support_packed16 ? vk::Format::eA1R5G5B5UnormPack16 : vk::Format::eR8G8Unorm;
     case SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4:
-        return vk::Format::eR4G4B4A4UnormPack16;
+        // RG8 fallback (same 16-bit size) when the device lacks packed 16-bit formats
+        return s_support_packed16 ? vk::Format::eR4G4B4A4UnormPack16 : vk::Format::eR8G8Unorm;
     case SCE_GXM_COLOR_BASE_FORMAT_U2U10U10U10:
         // TODO: only ABGR or ARGB swizzle is supported with this format
         return vk::Format::eA2R10G10B10UnormPack32;
@@ -764,7 +779,8 @@ vk::Format translate_format(SceGxmTextureBaseFormat base_format) {
         return vk::Format::eR16G16B16A16Sfloat;
 
     case SCE_GXM_TEXTURE_BASE_FORMAT_U5U6U5:
-        return vk::Format::eR5G6B5UnormPack16;
+        // RG8 fallback (same 16-bit size) when the device lacks RGB565 (e.g. Intel/AMD Macs)
+        return s_support_packed16 ? vk::Format::eR5G6B5UnormPack16 : vk::Format::eR8G8Unorm;
     case SCE_GXM_TEXTURE_BASE_FORMAT_F11F11F10:
         return vk::Format::eB10G11R11UfloatPack32;
     case SCE_GXM_TEXTURE_BASE_FORMAT_SE5M9M9M9:
@@ -789,10 +805,11 @@ vk::Format translate_format(SceGxmTextureBaseFormat base_format) {
         return vk::Format::eR8G8B8A8Snorm;
 
     case SCE_GXM_TEXTURE_BASE_FORMAT_U4U4U4U4:
-        return vk::Format::eR4G4B4A4UnormPack16;
+        // RG8 fallback (same 16-bit size) when the device lacks packed 16-bit formats
+        return s_support_packed16 ? vk::Format::eR4G4B4A4UnormPack16 : vk::Format::eR8G8Unorm;
     case SCE_GXM_TEXTURE_BASE_FORMAT_U1U5U5U5:
         // TODO: same as for the color format
-        return vk::Format::eA1R5G5B5UnormPack16;
+        return s_support_packed16 ? vk::Format::eA1R5G5B5UnormPack16 : vk::Format::eR8G8Unorm;
     case SCE_GXM_TEXTURE_BASE_FORMAT_U2U10U10U10:
         // TODO: same as for the color format
         return vk::Format::eA2R10G10B10UnormPack32;
