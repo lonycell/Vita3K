@@ -49,6 +49,10 @@ constexpr bool PAGE_NAME_TRACKING = true;
 static AccessViolationHandler access_violation_handler;
 static void register_access_violation_handler(const AccessViolationHandler &handler);
 
+// Host page size, cached for the signal handler's last-resort read-fault recovery (see
+// signal_handler). 0 until init() runs.
+static int g_recover_page_size = 0;
+
 static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_count, const char *name, const bool force);
 static void delete_memory(uint8_t *memory);
 
@@ -72,6 +76,7 @@ bool init(MemState &state, const bool use_page_table) {
 #endif
 
     assert(state.host_page_size >= 4096); // Limit imposed by Unicorn.
+    g_recover_page_size = state.host_page_size;
 
     void *preferred_address = reinterpret_cast<void *>(1ULL << 34);
 
@@ -640,6 +645,19 @@ static void signal_handler(int sig, siginfo_t *info, void *uct) noexcept {
     if (!is_executing) {
         if (access_violation_handler(reinterpret_cast<uint8_t *>(info->si_addr), is_writing)) {
             return;
+        }
+        // Last-resort recovery for an unresolved READ fault. This happens when a host thread reads
+        // emulated guest memory that was concurrently invalidated or protected — e.g. the movie
+        // audio output thread (avAudioOutput) reading a SceAvPlayer frame buffer that is torn down
+        // / write-watch-protected at the same instant. Crashing the whole emulator there is worse
+        // than continuing, so map the faulting page R/W and resume. mprotect fails for genuinely
+        // unmapped addresses, in which case we fall through to the abort below. Write faults are
+        // left untouched so GPU surface write-watching keeps working.
+        if (!is_writing && g_recover_page_size > 0) {
+            const uintptr_t fault = reinterpret_cast<uintptr_t>(info->si_addr);
+            void *const page = reinterpret_cast<void *>(fault & ~static_cast<uintptr_t>(g_recover_page_size - 1));
+            if (mprotect(page, g_recover_page_size, PROT_READ | PROT_WRITE) == 0)
+                return;
         }
     }
 
