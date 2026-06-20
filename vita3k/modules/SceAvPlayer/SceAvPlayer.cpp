@@ -94,6 +94,12 @@ struct PlayerInfoState {
     uint32_t audio_buffer_size = 0;
     std::array<Ptr<uint8_t>, RING_BUFFER_COUNT> audio_buffer;
 
+    // Ring buffers that were replaced by a larger reallocation. The audio/video output may still
+    // be reading a previous buffer on another thread when a resize happens, so we must NOT free
+    // them in place (that causes a use-after-free host fault, e.g. the avAudioOutput crash during
+    // movie playback). Keep them alive until the player is destroyed.
+    std::vector<Ptr<uint8_t>> retired_buffers;
+
     bool do_loop = false;
     bool paused = false;
 
@@ -211,8 +217,10 @@ static Ptr<uint8_t> get_buffer(const PlayerPtr &player, MediaType media_type,
     if (buffer_size < size) {
         buffer_size = size;
         for (uint32_t a = 0; a < PlayerInfoState::RING_BUFFER_COUNT; a++) {
+            // Retire instead of free: a previous buffer may still be in flight on the audio/video
+            // output thread. Freeing it here races with that read and faults the emulator.
             if (buffers[a])
-                free(mem, buffers[a]);
+                player->retired_buffers.push_back(buffers[a]);
             std::string alloc_name = fmt::format("AvPlayer {} Media Ring {}",
                 media_type == MediaType::VIDEO ? "Video" : "Audio", a);
 
@@ -286,6 +294,19 @@ EXPORT(int, sceAvPlayerClose, SceUID player_handle) {
     const PlayerPtr &player_info = lock_and_find(player_handle, state->players, state->mutex);
     const auto thread = emuenv.kernel.get_thread(thread_id);
     run_event_callback(emuenv, thread, player_info, SCE_AVPLAYER_STATE_STOP, 0, Ptr<void>(0));
+    // Playback has stopped, so the ring buffers (including retired ones kept alive during resizes)
+    // are no longer being read by the output threads and can be released now.
+    if (player_info) {
+        for (auto &b : player_info->video_buffer)
+            if (b)
+                free(emuenv.mem, b);
+        for (auto &b : player_info->audio_buffer)
+            if (b)
+                free(emuenv.mem, b);
+        for (auto &b : player_info->retired_buffers)
+            if (b)
+                free(emuenv.mem, b);
+    }
     std::lock_guard<std::mutex> lock(state->mutex);
     state->players.erase(player_handle);
     return 0;
