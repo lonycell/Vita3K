@@ -51,6 +51,11 @@ typedef std::map<SceUID, PlayerPtr> PlayerStates;
 struct AvPlayerState {
     std::mutex mutex;
     PlayerStates players;
+    // Ring buffers of closed players. Freeing them inside sceAvPlayerClose races with the movie
+    // audio output thread (avAudioOutput), which may still be draining the last chunk, causing a
+    // use-after-free host fault at the movie transition. Defer the free until the next
+    // sceAvPlayerInit, by which point that audio has drained.
+    std::vector<Ptr<uint8_t>> graveyard;
 };
 
 struct SceAvPlayerMemoryAllocator {
@@ -294,20 +299,20 @@ EXPORT(int, sceAvPlayerClose, SceUID player_handle) {
     const PlayerPtr &player_info = lock_and_find(player_handle, state->players, state->mutex);
     const auto thread = emuenv.kernel.get_thread(thread_id);
     run_event_callback(emuenv, thread, player_info, SCE_AVPLAYER_STATE_STOP, 0, Ptr<void>(0));
-    // Playback has stopped, so the ring buffers (including retired ones kept alive during resizes)
-    // are no longer being read by the output threads and can be released now.
+    // Don't free the ring buffers here: the movie audio output thread may still be draining the
+    // last chunk. Move them to the graveyard and let the next sceAvPlayerInit release them.
+    std::lock_guard<std::mutex> lock(state->mutex);
     if (player_info) {
         for (auto &b : player_info->video_buffer)
             if (b)
-                free(emuenv.mem, b);
+                state->graveyard.push_back(b);
         for (auto &b : player_info->audio_buffer)
             if (b)
-                free(emuenv.mem, b);
+                state->graveyard.push_back(b);
         for (auto &b : player_info->retired_buffers)
             if (b)
-                free(emuenv.mem, b);
+                state->graveyard.push_back(b);
     }
-    std::lock_guard<std::mutex> lock(state->mutex);
     state->players.erase(player_handle);
     return 0;
 }
@@ -459,6 +464,14 @@ EXPORT(bool, sceAvPlayerGetVideoDataEx, SceUID player_handle, SceAvPlayerFrameIn
 EXPORT(SceUID, sceAvPlayerInit, SceAvPlayerInfo *info) {
     emuenv.kernel.obj_store.create<AvPlayerState>();
     const auto state = emuenv.kernel.obj_store.get<AvPlayerState>();
+    // Release the previous (closed) player's ring buffers now that its audio output has drained.
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        for (auto &b : state->graveyard)
+            if (b)
+                free(emuenv.mem, b);
+        state->graveyard.clear();
+    }
     SceUID player_handle = emuenv.kernel.get_next_uid();
     PlayerPtr player = std::make_shared<PlayerInfoState>();
     state->players[player_handle] = player;
