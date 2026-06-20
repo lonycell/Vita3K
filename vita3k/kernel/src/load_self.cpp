@@ -775,7 +775,7 @@ SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std
         }
     }
 
-    // [NP message injection, opt-in via V3K_NP_MSG_INJECT] (see NP-RE-FINDINGS.md §10)
+    // [NP message injection — applied unconditionally] (see NP-RE-FINDINGS.md §10/§11)
     // Deliver one synthetic kNPToolKit_NPInitialized (PluginMessage.type=4) so managed
     // Sony.NP.Main.PumpMessages fires OnNPInitialized -> SceneFirst._NpReady=true -> the
     // game leaves the "checking system data" loading screen. The native toolkit never
@@ -792,8 +792,10 @@ SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std
     // So instrument BOTH UnityNpToolkit and ScreenShots: count calls + deliver a one-shot
     // PluginMessage.type=4 (kNPToolKit_NPInitialized) on GetFirstMessage. The scratch (flag +
     // 2 call counters) lives in the patched function's own dead code tail (seg0, writable).
-    static uint32_t s_np_ss_scratch = 0; // ScreenShots scratch addr, read by the NP poller
-    if (std::getenv("V3K_NP_MSG_INJECT")) {
+    // The byte-prologue guard inside patch_prx (push {r4-r6,lr} == 70 b5) makes this a no-op
+    // for any module whose offsets don't match this game's Sony Unity plugins, so it is safe
+    // to apply for every loaded SELF without an opt-in env var.
+    {
         // literal-pool offset for `ldr rX,[pc,#12]` placed at instr_off inside a fn at vaddr base
         auto litoff = [](uint32_t base, uint32_t instr_off) -> uint32_t {
             const uint32_t pc = (base + instr_off + 4) & ~3u;
@@ -830,26 +832,11 @@ SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std
         const auto s0 = segment_reloc_info.find(0);
         if (s0 != segment_reloc_info.end() && std::strncmp(module_info->name, "ScreenShots", 12) == 0) {
             const uint32_t b = s0->second.addr;
-            s_np_ss_scratch = b + 0x658;
             patch_prx(b + 0x644, b + 0x694 /*real impl behind veneer*/, b + 0x7DC, b + 0x658, "ScreenShots");
         }
         if (s0 != segment_reloc_info.end() && std::strncmp(module_info->name, "UnityNpToolkit", 28) == 0) {
             const uint32_t b = s0->second.addr;
-            const uint32_t scratch = b + 0x5F0C;
-            patch_prx(b + 0x5EF8, b + 0x5F76, b + 0x604A, scratch, "UnityNpToolkit");
-            // Poller: report whether either module's patched exports actually execute.
-            MemState *mp = &mem;
-            std::thread([mp, scratch]() {
-                for (int i = 0; i < 25; ++i) {
-                    std::this_thread::sleep_for(std::chrono::seconds(2));
-                    auto u8 = [&](uint32_t a) { return *Ptr<uint8_t>(a).get(*mp); };
-                    auto u32 = [&](uint32_t a) { return *Ptr<uint32_t>(a).get(*mp); };
-                    const uint32_t ss = s_np_ss_scratch;
-                    LOG_INFO("[NP-MSG-INJECT] t={}s NP[flag={} has={} get={}] SS[flag={} has={} get={}]",
-                        (i + 1) * 2, u8(scratch), u32(scratch + 4), u32(scratch + 8),
-                        ss ? u8(ss) : 0, ss ? u32(ss + 4) : 0, ss ? u32(ss + 8) : 0);
-                }
-            }).detach();
+            patch_prx(b + 0x5EF8, b + 0x5F76, b + 0x604A, b + 0x5F0C, "UnityNpToolkit");
         }
     }
 

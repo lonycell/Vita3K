@@ -20,7 +20,9 @@
 #include <audio/state.h>
 #include <kernel/state.h>
 #include <kernel/thread/thread_state.h>
+#include <mem/functions.h>
 #include <util/lock_and_find.h>
+#include <util/log.h>
 #include <util/tracy.h>
 
 TRACY_MODULE_NAME(SceAudio);
@@ -188,7 +190,7 @@ EXPORT(int, sceAudioOutOpenPort, SceAudioOutPortType type, int len, int freq, Sc
     return port_id;
 }
 
-EXPORT(int, sceAudioOutOutput, int port, const void *buf) {
+EXPORT(int, sceAudioOutOutput, int port, Ptr<const uint8_t> buf) {
     TRACY_FUNC(sceAudioOutOutput, port, buf);
     const AudioOutPortPtr prt = lock_and_find(port, emuenv.audio.out_ports, emuenv.audio.mutex);
     if (!prt) {
@@ -201,13 +203,27 @@ EXPORT(int, sceAudioOutOutput, int port, const void *buf) {
     if (!buf)
         return 0;
 
+    // The SceAvPlayer movie path can hand us a guest buffer that points into a reserved-but-
+    // uncommitted (PROT_NONE) page. The output adapter reads len_bytes from it host-side, which
+    // faults the whole emulator (KERN_PROTECTION_FAILURE) instead of being trapped as a guest
+    // access. Validate the source range and drop this chunk rather than crash.
+    const Address buf_start = buf.address();
+    const Address buf_end = buf_start + prt->len_bytes;
+    if (prt->len_bytes > 0
+        && !(is_valid_addr_range(emuenv.mem, buf_start, buf_end)
+            && is_valid_addr(emuenv.mem, buf_start)
+            && is_valid_addr(emuenv.mem, buf_end - 1))) {
+        LOG_WARN("sceAudioOutOutput: invalid/uncommitted buffer 0x{:08X} (len_bytes={}); dropping chunk", buf_start, prt->len_bytes);
+        return prt->len;
+    }
+
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
     if (!thread) {
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
     }
     // is it really useful to update the thread status?
     thread->update_status(ThreadStatus::wait);
-    emuenv.audio.audio_output(*prt, buf);
+    emuenv.audio.audio_output(*prt, buf.get(emuenv.mem));
     thread->update_status(ThreadStatus::run);
 
     return prt->len;
