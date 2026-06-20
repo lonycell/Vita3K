@@ -203,17 +203,24 @@ EXPORT(int, sceAudioOutOutput, int port, Ptr<const uint8_t> buf) {
     if (!buf)
         return 0;
 
-    // The SceAvPlayer movie path can hand us a guest buffer that points into a reserved-but-
-    // uncommitted (PROT_NONE) page. The output adapter reads len_bytes from it host-side, which
-    // faults the whole emulator (KERN_PROTECTION_FAILURE) instead of being trapped as a guest
-    // access. Validate the source range and drop this chunk rather than crash.
+    // The SceAvPlayer movie path can hand us a guest buffer that is either unmapped or, while a
+    // movie frame is in flight, currently read-protected (PROT_NONE) for GPU surface write-watch.
+    // The output adapter reads len_bytes from it on a host thread, so a fault there is not trapped
+    // as a recoverable guest access and crashes the whole emulator (KERN_PROTECTION_FAILURE on the
+    // avAudioOutput thread, seen on both x86_64 and arm64 / page-table external mappings). Drop the
+    // chunk rather than read memory we cannot safely touch host-side.
     const Address buf_start = buf.address();
     const Address buf_end = buf_start + prt->len_bytes;
+    auto read_blocked = [&](Address a) {
+        MemPerm perm = MemPerm::None;
+        return is_protecting(emuenv.mem, a, &perm) && perm == MemPerm::None;
+    };
     if (prt->len_bytes > 0
-        && !(is_valid_addr_range(emuenv.mem, buf_start, buf_end)
-            && is_valid_addr(emuenv.mem, buf_start)
-            && is_valid_addr(emuenv.mem, buf_end - 1))) {
-        LOG_WARN("sceAudioOutOutput: invalid/uncommitted buffer 0x{:08X} (len_bytes={}); dropping chunk", buf_start, prt->len_bytes);
+        && (!(is_valid_addr_range(emuenv.mem, buf_start, buf_end)
+                && is_valid_addr(emuenv.mem, buf_start)
+                && is_valid_addr(emuenv.mem, buf_end - 1))
+            || read_blocked(buf_start) || read_blocked(buf_end - 1))) {
+        LOG_WARN("sceAudioOutOutput: unreadable buffer 0x{:08X} (len_bytes={}); dropping chunk", buf_start, prt->len_bytes);
         return prt->len;
     }
 
