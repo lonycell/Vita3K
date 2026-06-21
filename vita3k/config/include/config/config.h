@@ -91,6 +91,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(PhysicalKeyCode, "keyboard-gui-toggle-touch", PhysicalKeyCode::KeyT, keyboard_gui_toggle_touch)                               \
     code(PhysicalKeyCode, "keyboard-toggle-texture-replacement", PhysicalKeyCode::Unbound, keyboard_toggle_texture_replacement)        \
     code(PhysicalKeyCode, "keyboard-take-screenshot", PhysicalKeyCode::Unbound, keyboard_take_screenshot)                              \
+    code(PhysicalKeyCode, "keyboard-toggle-translation", PhysicalKeyCode::Unbound, keyboard_toggle_translation)                        \
     code(PhysicalKeyCode, "keyboard-pinch-modifier", PhysicalKeyCode::Unbound, keyboard_pinch_modifier)                                \
     code(PhysicalKeyCode, "keyboard-alternate-pinch-in", PhysicalKeyCode::Unbound, keyboard_alternate_pinch_in)                        \
     code(PhysicalKeyCode, "keyboard-alternate-pinch-out", PhysicalKeyCode::Unbound, keyboard_alternate_pinch_out)                      \
@@ -123,6 +124,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(PhysicalKeyCode, "keyboard-gui-toggle-touch-alt", PhysicalKeyCode::Unbound, keyboard_gui_toggle_touch_alt)                    \
     code(PhysicalKeyCode, "keyboard-toggle-texture-replacement-alt", PhysicalKeyCode::Unbound, keyboard_toggle_texture_replacement_alt)\
     code(PhysicalKeyCode, "keyboard-take-screenshot-alt", PhysicalKeyCode::Unbound, keyboard_take_screenshot_alt)                      \
+    code(PhysicalKeyCode, "keyboard-toggle-translation-alt", PhysicalKeyCode::Unbound, keyboard_toggle_translation_alt)                \
     code(PhysicalKeyCode, "keyboard-pinch-modifier-alt", PhysicalKeyCode::Unbound, keyboard_pinch_modifier_alt)                        \
     code(PhysicalKeyCode, "keyboard-alternate-pinch-in-alt", PhysicalKeyCode::Unbound, keyboard_alternate_pinch_in_alt)                \
     code(PhysicalKeyCode, "keyboard-alternate-pinch-out-alt", PhysicalKeyCode::Unbound, keyboard_alternate_pinch_out_alt)
@@ -213,7 +215,15 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(std::string, "back-camera-id", std::string{}, back_camera_id)                                  \
     code(std::string, "back-camera-image", std::string{}, back_camera_image)                            \
     code(uint32_t, "back-camera-color", 0, back_camera_color)                                           \
-    code(bool, "tracy-primitive-impl", false, tracy_primitive_impl)
+    code(bool, "tracy-primitive-impl", false, tracy_primitive_impl)                                     \
+    code(bool, "screen-translation-enabled", false, screen_translation_enabled)                         \
+    code(std::string, "translation-source-lang", "JA", translation_source_lang)                         \
+    code(std::string, "translation-target-lang", "KO", translation_target_lang)                         \
+    code(std::string, "translation-deepl-api-key", std::string{}, translation_deepl_api_key)            \
+    code(bool, "translation-deepl-free-tier", true, translation_deepl_free_tier)                        \
+    code(int, "translation-mode", 0, translation_mode)                                                  \
+    code(int, "translation-auto-interval-ms", 3000, translation_auto_interval_ms)                       \
+    code(float, "translation-min-confidence", 0.3f, translation_min_confidence)
 
 // Vector members produced in the config file
 // Order is code(option_type, option_name, default_value)

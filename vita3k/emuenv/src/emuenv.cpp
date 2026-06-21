@@ -38,6 +38,7 @@
 #include <overlay/display_manager.h>
 #include <packages/license.h>
 #include <packages/sfo.h>
+#include <translator/state.h>
 #include <regmgr/state.h>
 #include <renderer/functions.h>
 #include <renderer/state.h>

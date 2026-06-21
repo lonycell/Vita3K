@@ -62,6 +62,14 @@ bool is_protecting(MemState &state, Address addr, MemPerm *perm = nullptr);
 bool is_valid_addr(const MemState &state, Address addr);
 bool is_valid_addr_range(const MemState &state, Address start, Address end);
 bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcept;
+// Resolve a host memory-protection fault (write-watch dirtying or last-resort read recovery) given
+// the raw host fault address. Mirrors the logic of the POSIX signal handler and returns true if the
+// fault was handled. Exposed so the CPU backend can route faults that its JIT exception handler
+// intercepts but does not own (see dynarmic SetNonJitFaultFallback on macOS).
+bool resolve_host_protection_fault(void *fault_addr, bool is_write) noexcept;
+// Mark the emulator as tearing down. While set, resolve_host_protection_fault recovers in-bounds
+// guest faults from lingering subsystem threads (instead of aborting) so closing a game can't crash.
+void set_emulation_shutting_down(bool value) noexcept;
 Block alloc_block(MemState &mem, uint32_t size, const char *name, Address start_addr = user_main_memory_start);
 Address alloc_at(MemState &state, Address address, uint32_t size, const char *name);
 Address try_alloc_at(MemState &state, Address address, uint32_t size, const char *name);

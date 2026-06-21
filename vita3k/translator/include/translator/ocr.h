@@ -15,24 +15,25 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+// OCR backend interface. The macOS implementation lives in ocr_vision.mm
+// (Apple Vision); other platforms get a stub in backends_stub.cpp.
+
 #pragma once
 
-#include <util/exit_code.h>
-#include <util/fs.h>
+#include <translator/types.h>
 
-#include <string>
+#include <cstdint>
 #include <vector>
 
-struct AppLaunchRequest;
-struct EmuEnvState;
+namespace translator::ocr {
 
-ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv);
-ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchRequest &launch_request);
-ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id);
-ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchRequest &launch_request);
-void toggle_texture_replacement(EmuEnvState &emuenv);
-void take_screenshot(EmuEnvState &emuenv);
+// Recognize text in an RGBA8 image (row-major, stride = width * 4, top-left
+// origin). Returns recognized lines with TOP-LEFT normalized coordinates.
+// Returns an empty vector on failure or when no text is found.
+std::vector<TextRegion> recognize(const uint8_t *rgba, uint32_t width,
+    uint32_t height, const Options &opts);
 
-// Screen translation: toggle the overlay (hotkey) and per-frame driver.
-void toggle_screen_translation(EmuEnvState &emuenv);
-void translator_tick(EmuEnvState &emuenv);
+// Whether OCR is usable in this build / on this platform.
+bool available();
+
+} // namespace translator::ocr

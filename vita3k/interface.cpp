@@ -36,6 +36,14 @@
 #include <renderer/state.h>
 #include <renderer/texture_cache.h>
 
+#include <overlay/display_manager.h>
+#include <overlay/element.h>
+#include <overlay/translation_overlay.h>
+#include <translator/state.h>
+
+#include <algorithm>
+#include <chrono>
+
 #include <miniz.h>
 #include <pugixml.hpp>
 
@@ -598,6 +606,98 @@ void take_screenshot(EmuEnvState &emuenv) {
             LOG_INFO("Successfully saved screenshot to {}", save_file);
         else
             LOG_INFO("Failed to save screenshot");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Screen translation glue. Keeps the translator lib decoupled from renderer /
+// emuenv: this layer captures frames and syncs results to the overlay.
+// See dev-docs/screen-translation/03-detailed-design.md
+// ---------------------------------------------------------------------------
+
+static uint64_t translator_now_us() {
+    using namespace std::chrono;
+    return static_cast<uint64_t>(
+        duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count());
+}
+
+static translator::TranslatorState *ensure_translator(EmuEnvState &emuenv) {
+    if (!emuenv.cfg.screen_translation_enabled)
+        return nullptr;
+
+    if (!emuenv.translator)
+        emuenv.translator = std::make_unique<translator::TranslatorState>();
+
+    // Sync options from config every call (cheap; config may change at runtime).
+    translator::Options opts;
+    opts.source_lang = emuenv.cfg.translation_source_lang;
+    opts.target_lang = emuenv.cfg.translation_target_lang;
+    opts.deepl_api_key = emuenv.cfg.translation_deepl_api_key;
+    opts.deepl_free_tier = emuenv.cfg.translation_deepl_free_tier;
+    opts.min_confidence = emuenv.cfg.translation_min_confidence;
+    emuenv.translator->set_options(opts);
+    emuenv.translator->set_mode(emuenv.cfg.translation_mode,
+        static_cast<uint64_t>(std::max(250, emuenv.cfg.translation_auto_interval_ms)) * 1000ull);
+
+    return emuenv.translator.get();
+}
+
+void toggle_screen_translation(EmuEnvState &emuenv) {
+    auto *tr = ensure_translator(emuenv);
+    if (!tr)
+        return;
+    tr->toggle();
+}
+
+void translator_tick(EmuEnvState &emuenv) {
+    if (!emuenv.cfg.screen_translation_enabled || emuenv.io.title_id.empty())
+        return;
+
+    auto *tr = emuenv.translator.get();
+    if (!tr)
+        return;
+
+    const uint64_t now_us = translator_now_us();
+
+    // 1) Capture and submit a new frame when the pipeline asks for one.
+    if (tr->wants_new_frame(now_us)) {
+        uint32_t width = 0, height = 0;
+        std::vector<uint32_t> frame = emuenv.renderer->dump_frame(emuenv.display, width, height);
+        if (!frame.empty() && frame.size() == static_cast<size_t>(width) * height) {
+            for (uint32_t &pixel : frame)
+                pixel |= 0xFF000000; // force opaque alpha for OCR
+            tr->submit_frame(frame.data(), width, height, now_us);
+        }
+    }
+
+    // 2) Sync the overlay with the current visibility / results.
+    if (!emuenv.overlay_manager)
+        return;
+
+    if (tr->is_visible()) {
+        auto ov = emuenv.overlay_manager->get<overlay::translation_overlay>();
+        if (!ov)
+            ov = emuenv.overlay_manager->create<overlay::translation_overlay>();
+        ov->visible = true;
+
+        std::vector<translator::TranslatedLine> lines;
+        if (tr->take_results(lines)) {
+            std::vector<overlay::translation_overlay::line> ov_lines;
+            ov_lines.reserve(lines.size());
+            for (const auto &l : lines) {
+                overlay::translation_overlay::line ol;
+                ol.x = l.x;
+                ol.y = l.y;
+                ol.w = l.w;
+                ol.h = l.h;
+                ol.text = overlay::utf8_to_u32string(l.translated);
+                ov_lines.push_back(std::move(ol));
+            }
+            ov->set_lines(std::move(ov_lines));
+        }
+        ov->set_status(overlay::utf8_to_u32string(tr->status_message()));
+    } else if (emuenv.overlay_manager->get<overlay::translation_overlay>()) {
+        emuenv.overlay_manager->remove<overlay::translation_overlay>();
     }
 }
 

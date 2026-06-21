@@ -686,8 +686,13 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         support_memory_mapping &= support_standard_layout;
 
 #ifdef __APPLE__
-        // we need to make a copy of the vertex buffer for moltenvk, so disable memory mapping
-        support_memory_mapping = false;
+        // Normally disabled on macOS because MoltenVK needs a copy of the vertex buffer to
+        // restride attribute strides to a multiple of 4 (Metal requirement), which conflicts
+        // with the direct device-address access used by memory mapping.
+        // EXPERIMENT (PCSG00708): memory mapping is required for USSE STR-based GPU skinning.
+        // Games whose vertex streams already use 4-aligned strides don't need the restride,
+        // so allow memory mapping here to let skinning run. Revert if odd-stride games regress.
+        // support_memory_mapping = false;
 #endif
 
 #ifdef __ANDROID__

@@ -693,16 +693,29 @@ void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params,
 
         assert(nb_components < 4);
         if (nb_components > 0) {
-            // do one last load for the at most 3 last components
-            const spv::Id buffer_container = make_or_get_buffer_ptr(b, utils, nb_components, 16, is_buffer_store);
-            const spv::Id buffer_address_vec = b.createUnaryOp(spv::OpBitcast, buffer_container, buffer_address);
-
-            spv::Id accessed = utils::create_access_chain(b, spv::StorageClassPhysicalStorageBuffer, buffer_address_vec, { zero, b.makeIntConstant(buffer_idx_vec4) });
-
             if (is_buffer_store) {
+                // Store the at most 3 trailing components. A 16-byte-strided runtime array of a
+                // scalar/short vector is lowered by SPIRV-Cross (MoltenVK) into a float4-element
+                // array, so a scalar store becomes an illegal `(thread float&)(device float4)`
+                // C-style cast and Metal rejects the pipeline. Instead, write each component
+                // through a scalar (stride-4) pointer at an explicit byte offset, which is the
+                // same approach already used by the sub-32-bit path below and emits valid MSL.
+                const spv::Id f32 = b.makeFloatType(32);
+                const spv::Id scalar_container = make_or_get_buffer_ptr(b, utils, 1, 4, true);
                 spv::Id data = load(b, params, utils, features, dest, (1 << nb_components) - 1, dest_offset);
-                b.createStore(data, accessed, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
+                for (uint32_t c = 0; c < nb_components; c++) {
+                    spv::Id comp_addr = add_uvec2_uint(b, buffer_address, b.makeUintConstant(buffer_idx_vec4 * 16 + c * sizeof(uint32_t)));
+                    comp_addr = b.createUnaryOp(spv::OpBitcast, scalar_container, comp_addr);
+                    spv::Id slot = utils::create_access_chain(b, spv::StorageClassPhysicalStorageBuffer, comp_addr, { zero, zero });
+                    spv::Id comp_val = (nb_components == 1) ? data : b.createCompositeExtract(data, f32, c);
+                    b.createStore(comp_val, slot, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
+                }
             } else {
+                // do one last load for the at most 3 last components
+                const spv::Id buffer_container = make_or_get_buffer_ptr(b, utils, nb_components, 16, is_buffer_store);
+                const spv::Id buffer_address_vec = b.createUnaryOp(spv::OpBitcast, buffer_container, buffer_address);
+
+                spv::Id accessed = utils::create_access_chain(b, spv::StorageClassPhysicalStorageBuffer, buffer_address_vec, { zero, b.makeIntConstant(buffer_idx_vec4) });
                 accessed = b.createLoad(accessed, spv::NoPrecision, spv::MemoryAccessAlignedMask, spv::ScopeMax, 4);
                 store(b, params, utils, features, dest, accessed, (1 << nb_components) - 1, dest_offset);
             }

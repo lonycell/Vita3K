@@ -85,6 +85,9 @@ bool CtrlKeyboardFilter::eventFilter(QObject *watched, QEvent *event) {
         if (pressed && matches(cfg.keyboard_take_screenshot, cfg.keyboard_take_screenshot_alt))
             emit screenshot_requested();
 
+        if (pressed && matches(cfg.keyboard_toggle_translation, cfg.keyboard_toggle_translation_alt))
+            emit translation_toggle_requested();
+
         return false;
     }
     case QEvent::MouseButtonPress:

@@ -491,6 +491,41 @@ static void *add_alpha_channel(const void *pixels, const uint32_t width, const u
     return data.data();
 }
 
+// Decode packed 16-bit textures (U5U6U5 / U4U4U4U4 / U1U5U5U5) to R8G8B8A8 when the
+// device lacks native packed-16 support (e.g. Metal on Intel/AMD Macs). The logical
+// R/G/B/A channels are written in their natural positions so the existing view swizzle
+// (derived from the original GXM format) keeps mapping correctly.
+static void *decode_packed16_to_rgba8(SceGxmTextureBaseFormat fmt, const void *pixels,
+    const uint32_t width, const uint32_t height, std::vector<uint8_t> &data) {
+    data.resize(static_cast<size_t>(width) * height * 4);
+    const uint16_t *src = static_cast<const uint16_t *>(pixels);
+    uint8_t *dst = data.data();
+    const size_t count = static_cast<size_t>(width) * height;
+    auto exp5 = [](uint32_t v) -> uint8_t { return static_cast<uint8_t>((v << 3) | (v >> 2)); };
+    auto exp6 = [](uint32_t v) -> uint8_t { return static_cast<uint8_t>((v << 2) | (v >> 4)); };
+    auto exp4 = [](uint32_t v) -> uint8_t { return static_cast<uint8_t>((v << 4) | v); };
+    for (size_t i = 0; i < count; i++) {
+        const uint16_t v = src[i];
+        uint8_t r = 0, g = 0, b = 0, a = 255;
+        switch (fmt) {
+        case SCE_GXM_TEXTURE_BASE_FORMAT_U5U6U5:
+            r = exp5((v >> 11) & 0x1F); g = exp6((v >> 5) & 0x3F); b = exp5(v & 0x1F); a = 255;
+            break;
+        case SCE_GXM_TEXTURE_BASE_FORMAT_U4U4U4U4:
+            r = exp4((v >> 12) & 0xF); g = exp4((v >> 8) & 0xF); b = exp4((v >> 4) & 0xF); a = exp4(v & 0xF);
+            break;
+        case SCE_GXM_TEXTURE_BASE_FORMAT_U1U5U5U5:
+            a = (v & 0x8000) ? 255 : 0; r = exp5((v >> 10) & 0x1F); g = exp5((v >> 5) & 0x1F); b = exp5(v & 0x1F);
+            break;
+        default:
+            break;
+        }
+        dst[0] = r; dst[1] = g; dst[2] = b; dst[3] = a;
+        dst += 4;
+    }
+    return data.data();
+}
+
 void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height,
     uint32_t mip_index, const void *pixels, int face, uint32_t pixels_per_stride) {
     if (!is_texture_transfer_ready)
@@ -510,6 +545,14 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
     if (base_format == SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8 || base_format == SCE_GXM_TEXTURE_BASE_FORMAT_S8S8S8) {
         text_data = add_alpha_channel(pixels, pixels_per_stride, height, temp_data);
         base_format = (base_format == SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8) ? SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8U8 : SCE_GXM_TEXTURE_BASE_FORMAT_S8S8S8S8;
+    } else if (!get_packed16_support()
+        && (base_format == SCE_GXM_TEXTURE_BASE_FORMAT_U5U6U5
+            || base_format == SCE_GXM_TEXTURE_BASE_FORMAT_U4U4U4U4
+            || base_format == SCE_GXM_TEXTURE_BASE_FORMAT_U1U5U5U5)) {
+        // device lacks native packed-16 support: decode to R8G8B8A8 (matches the format
+        // chosen in translate_format) instead of mis-reading the data as RG8.
+        text_data = decode_packed16_to_rgba8(base_format, pixels, pixels_per_stride, height, temp_data);
+        base_format = SCE_GXM_TEXTURE_BASE_FORMAT_U8U8U8U8;
     }
 
     vk::DeviceSize upload_size;

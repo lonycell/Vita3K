@@ -18,6 +18,8 @@
 #include <gui-qt/game_window.h>
 #include <gui-qt/gui_settings.h>
 
+#include <interface.h>
+
 #include <app/functions.h>
 #include <config/config.h>
 #include <config/state.h>
@@ -400,6 +402,9 @@ void GameWindow::ui_tick() {
         im->update(Qt::ImEnabled);
     }
     m_ime_was_active = ime_active;
+
+    // Drive the screen-translation pipeline (capture + overlay sync).
+    translator_tick(m_emuenv);
 }
 
 void GameWindow::sync_native_window_preferences() {

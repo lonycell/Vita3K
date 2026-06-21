@@ -20,6 +20,7 @@
 #include <cpu/state.h>
 #include <util/log.h>
 
+#include <mem/functions.h>
 #include <mem/ptr.h>
 
 #include <dynarmic/frontend/A32/a32_ir_emitter.h>
@@ -29,7 +30,9 @@
 #include <atomic>
 #include <bit>
 #include <cstdlib>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -367,12 +370,35 @@ std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
     return std::make_unique<Dynarmic::A32::Jit>(config);
 }
 
+#ifdef __APPLE__
+// On macOS dynarmic installs a task-level Mach exception port that intercepts every EXC_BAD_ACCESS,
+// including faults from native (non-JIT) host code on protected guest memory. Without forwarding,
+// the host's own SIGSEGV-based memory-protection handler never runs, which breaks GPU memory
+// mapping (write-watch / page recovery) and aborts. Route those non-JIT faults back to the memory
+// module's resolver. See Dynarmic::Backend::SetNonJitFaultFallback.
+namespace Dynarmic::Backend {
+void SetNonJitFaultFallback(std::function<bool(void *fault_address, bool is_write)> callback);
+} // namespace Dynarmic::Backend
+
+static void install_macos_non_jit_fault_fallback() {
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        Dynarmic::Backend::SetNonJitFaultFallback([](void *fault_address, bool is_write) {
+            return resolve_host_protection_fault(fault_address, is_write);
+        });
+    });
+}
+#endif
+
 DynarmicCPU::DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt)
     : parent(state)
     , cb(std::make_unique<ArmDynarmicCallback>(*state, *this))
     , cp15(std::make_shared<ArmDynarmicCP15>())
     , core_id(processor_id)
     , cpu_opt(cpu_opt) {
+#ifdef __APPLE__
+    install_macos_non_jit_fault_fallback();
+#endif
     jit = make_jit();
 }
 

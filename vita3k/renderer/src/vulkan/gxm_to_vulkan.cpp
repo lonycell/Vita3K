@@ -34,6 +34,10 @@ void set_packed16_support(bool supported) {
     s_support_packed16 = supported;
 }
 
+bool get_packed16_support() {
+    return s_support_packed16;
+}
+
 vk::Format translate_attribute_format(SceGxmAttributeFormat format, unsigned int component_count, bool is_integer, bool is_signed) {
     if (component_count == 0 || component_count > 4 || format > SCE_GXM_ATTRIBUTE_FORMAT_UNTYPED)
         LOG_ERROR("Unsupported attribute format {}x{}", log_hex(format), component_count);
@@ -779,8 +783,9 @@ vk::Format translate_format(SceGxmTextureBaseFormat base_format) {
         return vk::Format::eR16G16B16A16Sfloat;
 
     case SCE_GXM_TEXTURE_BASE_FORMAT_U5U6U5:
-        // RG8 fallback (same 16-bit size) when the device lacks RGB565 (e.g. Intel/AMD Macs)
-        return s_support_packed16 ? vk::Format::eR5G6B5UnormPack16 : vk::Format::eR8G8Unorm;
+        // When the device lacks RGB565 (e.g. Intel/AMD Macs) the pixels are decoded
+        // to R8G8B8A8 on upload (see upload_texture_impl), so request that format here.
+        return s_support_packed16 ? vk::Format::eR5G6B5UnormPack16 : vk::Format::eR8G8B8A8Unorm;
     case SCE_GXM_TEXTURE_BASE_FORMAT_F11F11F10:
         return vk::Format::eB10G11R11UfloatPack32;
     case SCE_GXM_TEXTURE_BASE_FORMAT_SE5M9M9M9:
@@ -805,11 +810,11 @@ vk::Format translate_format(SceGxmTextureBaseFormat base_format) {
         return vk::Format::eR8G8B8A8Snorm;
 
     case SCE_GXM_TEXTURE_BASE_FORMAT_U4U4U4U4:
-        // RG8 fallback (same 16-bit size) when the device lacks packed 16-bit formats
-        return s_support_packed16 ? vk::Format::eR4G4B4A4UnormPack16 : vk::Format::eR8G8Unorm;
+        // decoded to R8G8B8A8 on upload when packed 16-bit is unsupported
+        return s_support_packed16 ? vk::Format::eR4G4B4A4UnormPack16 : vk::Format::eR8G8B8A8Unorm;
     case SCE_GXM_TEXTURE_BASE_FORMAT_U1U5U5U5:
-        // TODO: same as for the color format
-        return s_support_packed16 ? vk::Format::eA1R5G5B5UnormPack16 : vk::Format::eR8G8Unorm;
+        // decoded to R8G8B8A8 on upload when packed 16-bit is unsupported
+        return s_support_packed16 ? vk::Format::eA1R5G5B5UnormPack16 : vk::Format::eR8G8B8A8Unorm;
     case SCE_GXM_TEXTURE_BASE_FORMAT_U2U10U10U10:
         // TODO: same as for the color format
         return vk::Format::eA2R10G10B10UnormPack32;

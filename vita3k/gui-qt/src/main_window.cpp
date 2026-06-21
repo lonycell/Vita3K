@@ -1030,6 +1030,9 @@ std::optional<AppLaunchRequest> MainWindow::boot_game_once(const AppLaunchReques
     connect(m_kb_filter, &CtrlKeyboardFilter::screenshot_requested,
         this, [this]() { take_screenshot(emuenv); });
 
+    connect(m_kb_filter, &CtrlKeyboardFilter::translation_toggle_requested,
+        this, [this]() { toggle_screen_translation(emuenv); });
+
     if (auto next_request = take_pending_app_launch_request()) {
         on_game_closed();
         return next_request;

@@ -459,6 +459,10 @@ bool init(EmuEnvState &state, Config &cfg, const Root &root_paths) {
 }
 
 void shutdown_app_runtime(EmuEnvState &state) {
+    // Tolerate guest-memory faults from threads that outlive their subsystem's deinit during the
+    // teardown below, so closing a game can't intermittently crash on exit (macOS in particular).
+    set_emulation_shutting_down(true);
+
     state.audio.stop_all_ports();
 
     gxm::shutdown(state);
@@ -552,6 +556,9 @@ void reset_app_state(EmuEnvState &state) {
 }
 
 bool late_init(EmuEnvState &state) {
+    // a new session starts with normal (non-teardown) fault handling
+    set_emulation_shutting_down(false);
+
     // note: mem is not initialized yet but that's not an issue
     // the renderer is not using it yet, just storing it for later uses
     state.renderer->late_init(state.cfg, state.app_path, state.mem);

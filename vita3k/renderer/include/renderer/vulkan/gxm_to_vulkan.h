@@ -34,6 +34,10 @@ namespace renderer::vulkan {
 // fall back to a supported 16-bit format (RG8, same byte size) so the emulator
 // keeps running instead of aborting on image creation. Set once at device creation.
 void set_packed16_support(bool supported);
+// Whether the device natively supports the packed 16-bit RGB formats. When false,
+// packed-16 textures are decoded to R8G8B8A8 on upload (see upload_texture_impl)
+// instead of being mis-reinterpreted as RG8.
+bool get_packed16_support();
 
 vk::Format translate_attribute_format(SceGxmAttributeFormat format, unsigned int component_count, bool is_integer, bool is_signed);
 vk::BlendFactor translate_blend_factor(const SceGxmBlendFactor blend_factor);

@@ -18,6 +18,7 @@ add_library(
 	include/overlay/common_dialog.h
 	include/overlay/shader_precompile_progress.h
 	include/overlay/pause_overlay.h
+	include/overlay/translation_overlay.h
 	src/compiled_resource.cpp
 	src/font.cpp
 	src/element.cpp
@@ -33,6 +34,7 @@ add_library(
 	src/common_dialog.cpp
 	src/shader_precompile_progress.cpp
 	src/pause_overlay.cpp
+	src/translation_overlay.cpp
 )
 
 target_include_directories(overlay PUBLIC include)

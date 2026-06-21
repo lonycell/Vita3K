@@ -22,6 +22,7 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstring>
 #include <mutex>
@@ -52,6 +53,17 @@ static void register_access_violation_handler(const AccessViolationHandler &hand
 // Host page size, cached for the signal handler's last-resort read-fault recovery (see
 // signal_handler). 0 until init() runs.
 static int g_recover_page_size = 0;
+
+// Set during emulator teardown. Once a session is shutting down, lingering subsystem threads
+// (audio / ngs / net / avplayer) can briefly dereference guest memory through structures that
+// deinit has already reset, producing an otherwise-fatal access fault on exit. During shutdown we
+// recover these in-bounds guest faults (map the page R/W and resume) instead of aborting; write-
+// watch correctness no longer matters at that point. See resolve_host_protection_fault.
+static std::atomic<bool> g_emulation_shutting_down{ false };
+
+void set_emulation_shutting_down(bool value) noexcept {
+    g_emulation_shutting_down.store(value, std::memory_order_relaxed);
+}
 
 static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_count, const char *name, const bool force);
 static void delete_memory(uint8_t *memory);
@@ -328,6 +340,25 @@ bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcep
     state.protect_tree.erase(it);
 
     return true;
+}
+
+bool resolve_host_protection_fault(void *fault_addr, bool is_write) noexcept {
+    if (access_violation_handler && access_violation_handler(static_cast<uint8_t *>(fault_addr), is_write))
+        return true;
+
+#ifndef _WIN32
+    // Last-resort recovery: map the faulting page R/W and resume. Normally only for READ faults
+    // (write faults are left untouched so GPU surface write-watching keeps working), but during
+    // teardown we also recover writes so a lingering thread can't crash the process on exit.
+    if ((!is_write || g_emulation_shutting_down.load(std::memory_order_relaxed)) && g_recover_page_size > 0) {
+        const uintptr_t fault = reinterpret_cast<uintptr_t>(fault_addr);
+        void *const page = reinterpret_cast<void *>(fault & ~static_cast<uintptr_t>(g_recover_page_size - 1));
+        if (mprotect(page, g_recover_page_size, PROT_READ | PROT_WRITE) == 0)
+            return true;
+    }
+#endif
+
+    return false;
 }
 
 bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPerm perm, const ProtectCallback &callback) {
@@ -642,24 +673,11 @@ static void signal_handler(int sig, siginfo_t *info, void *uct) noexcept {
     const bool is_writing = err & 0x2;
 #endif
 
-    if (!is_executing) {
-        if (access_violation_handler(reinterpret_cast<uint8_t *>(info->si_addr), is_writing)) {
-            return;
-        }
-        // Last-resort recovery for an unresolved READ fault. This happens when a host thread reads
-        // emulated guest memory that was concurrently invalidated or protected — e.g. the movie
-        // audio output thread (avAudioOutput) reading a SceAvPlayer frame buffer that is torn down
-        // / write-watch-protected at the same instant. Crashing the whole emulator there is worse
-        // than continuing, so map the faulting page R/W and resume. mprotect fails for genuinely
-        // unmapped addresses, in which case we fall through to the abort below. Write faults are
-        // left untouched so GPU surface write-watching keeps working.
-        if (!is_writing && g_recover_page_size > 0) {
-            const uintptr_t fault = reinterpret_cast<uintptr_t>(info->si_addr);
-            void *const page = reinterpret_cast<void *>(fault & ~static_cast<uintptr_t>(g_recover_page_size - 1));
-            if (mprotect(page, g_recover_page_size, PROT_READ | PROT_WRITE) == 0)
-                return;
-        }
-    }
+    // The recovery path (write-watch dirtying + last-resort read recovery for e.g. the movie audio
+    // thread reading a torn-down SceAvPlayer buffer) lives in resolve_host_protection_fault so the
+    // CPU backend's macOS Mach exception fallback shares identical behavior.
+    if (!is_executing && resolve_host_protection_fault(info->si_addr, is_writing))
+        return;
 
     LOG_CRITICAL("Unhandled access to 0x{:X}", reinterpret_cast<uintptr_t>(info->si_addr));
     raise(SIGTRAP);

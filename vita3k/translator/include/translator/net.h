@@ -15,24 +15,24 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+// Translation backend interface. The macOS implementation lives in
+// net_deepl.mm (DeepL via NSURLSession); other platforms get a stub.
+
 #pragma once
 
-#include <util/exit_code.h>
-#include <util/fs.h>
+#include <translator/types.h>
 
 #include <string>
 #include <vector>
 
-struct AppLaunchRequest;
-struct EmuEnvState;
+namespace translator::net {
 
-ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv);
-ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchRequest &launch_request);
-ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id);
-ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchRequest &launch_request);
-void toggle_texture_replacement(EmuEnvState &emuenv);
-void take_screenshot(EmuEnvState &emuenv);
+// Translate a batch of texts in a single request. The returned vector has the
+// same length and order as the input. On failure an empty vector is returned.
+std::vector<std::string> translate(const std::vector<std::string> &texts,
+    const Options &opts);
 
-// Screen translation: toggle the overlay (hotkey) and per-frame driver.
-void toggle_screen_translation(EmuEnvState &emuenv);
-void translator_tick(EmuEnvState &emuenv);
+// Whether the translation backend is usable (platform + API key configured).
+bool available(const Options &opts);
+
+} // namespace translator::net

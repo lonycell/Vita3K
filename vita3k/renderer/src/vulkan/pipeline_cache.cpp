@@ -919,13 +919,29 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         .subpass = 0
     };
 
-    const auto result = state.device.createGraphicsPipeline(pipeline_cache, pipeline_info);
-    if (result.result != vk::Result::eSuccess) {
-        LOG_CRITICAL("Failed to create pipeline.");
+    // createGraphicsPipeline (vulkan-hpp) throws on error results. A driver/shader-compiler failure
+    // for a single pipeline (e.g. MoltenVK's Metal compiler aborting on a specific shader) must not
+    // take down the whole emulator: log which shaders were involved and return null so the draw is
+    // skipped, exactly as the async path does before its pipeline is ready.
+    const auto hex = [](const auto &digest) {
+        std::string s;
+        for (const auto byte : digest)
+            s += fmt::format("{:02x}", byte);
+        return s;
+    };
+    try {
+        const auto result = state.device.createGraphicsPipeline(pipeline_cache, pipeline_info);
+        if (result.result != vk::Result::eSuccess) {
+            LOG_CRITICAL("Failed to create pipeline (vert {}, frag {}): {}",
+                hex(vertex_program.hash), hex(fragment_program.hash), vk::to_string(result.result));
+            return nullptr;
+        }
+        return result.value;
+    } catch (const vk::SystemError &err) {
+        LOG_CRITICAL("Failed to create pipeline (vert {}, frag {}): {}",
+            hex(vertex_program.hash), hex(fragment_program.hash), err.what());
         return nullptr;
     }
-
-    return result.value;
 }
 
 vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem) {

@@ -71,6 +71,10 @@ namespace overlay {
 class display_manager;
 }
 
+namespace translator {
+struct TranslatorState;
+}
+
 typedef float SceFloat;
 struct FVector2 {
     SceFloat x;
@@ -179,6 +183,9 @@ public:
     int current_font_level = 0;
 
     std::unique_ptr<overlay::display_manager> overlay_manager;
+
+    // Real-time screen translation pipeline (see vita3k/translator).
+    std::unique_ptr<translator::TranslatorState> translator;
 
     void post_app_launch_request(AppLaunchRequest request) {
         std::scoped_lock lock(_launch_request_mutex);

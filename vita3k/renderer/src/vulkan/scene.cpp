@@ -25,9 +25,22 @@
 
 #include <util/log.h>
 
+#include <algorithm>
+#include <mutex>
+
 namespace renderer::vulkan {
 
+// Guest address of the most recently bound vertex uniform block, per host block index
+// (0 = default uniform buffer, 1.. = SceGxm uniform buffer index + 1). Used by the CPU
+// vertex-job skinning path (try_cpu_vertex_job_skin) to locate the bone-matrix and output
+// buffers, which the skinning shader would otherwise reach through memory-mapped device addresses.
+static constexpr int MAX_VERTEX_UNIFORM_BLOCKS = 15;
+static uint32_t g_vertex_uniform_block_addr[MAX_VERTEX_UNIFORM_BLOCKS] = {};
+
 void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *program, const bool vertex_shader, const int block_num, const int size, Ptr<uint8_t> data) {
+    if (vertex_shader && block_num >= 0 && block_num < MAX_VERTEX_UNIFORM_BLOCKS)
+        g_vertex_uniform_block_addr[block_num] = data.address();
+
     auto offset = program->uniform_buffer_data_offsets.at(block_num);
     if (offset == static_cast<std::uint32_t>(-1)) {
         return;
@@ -324,11 +337,98 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
     context.render_cmd.bindVertexBuffers(0, max_stream_idx, context.vertex_stream_buffers, context.vertex_stream_offsets);
 }
 
+// Recognize this game's GPU-skinning vertex job and, if it matches, perform 4-bone linear-blend
+// skinning on the CPU, writing the skinned position+normal into the output buffer in guest memory.
+// Returns true if it handled the draw (the caller must then skip the GPU draw).
+//
+// Shape (decoded from shader 5120b121 / GXP reflection, verified against live captures):
+//   - vertex program has the BUFFER_STORE flag (writes to memory via USSE STR)
+//   - stream 0 (stride 24): position float3 @0, normal float3 @12
+//   - stream 1 (stride 32): bone weights float4 @0, bone indices uint4 @16
+//   - uniform buffer index 0 (host block 1): bone matrices, 48 bytes each (3x4 row-major affine)
+//   - uniform buffer index 1 (host block 2): output buffer (position+normal, stride 24)
+static bool try_cpu_vertex_job_skin(VKContext &context, SceGxmIndexFormat format, void *indices_ptr, size_t count, MemState &mem) {
+    const SceGxmVertexProgram &vprog = *context.record.vertex_program.get(mem);
+    const SceGxmProgram *vgxp = vprog.program.get(mem);
+    if (!vgxp || !(vgxp->program_flags & SCE_GXM_PROGRAM_FLAG_BUFFER_STORE))
+        return false;
+
+    // Match the exact attribute/stream signature so we never mis-handle some other store shader.
+    if (vprog.streams.size() != 2 || vprog.attributes.size() != 4)
+        return false;
+    if (vprog.streams[0].stride != 24 || vprog.streams[1].stride != 32)
+        return false;
+
+    const uint8_t *s0 = context.record.vertex_streams[0].data.get(mem);
+    const uint8_t *s1 = context.record.vertex_streams[1].data.get(mem);
+    const float *mats = Ptr<const float>(g_vertex_uniform_block_addr[1]).get(mem);   // bone matrices (block 1)
+    uint8_t *outbuf = Ptr<uint8_t>(g_vertex_uniform_block_addr[2]).get(mem);          // output buffer (block 2)
+    if (!s0 || !s1 || !mats || !outbuf)
+        return false;
+
+    const uint32_t s0_stride = vprog.streams[0].stride;
+    const uint32_t s1_stride = vprog.streams[1].stride;
+    constexpr uint32_t out_stride = 24; // position float3 + normal float3
+
+    const auto skin_vertex = [&](uint32_t v) {
+        const float *in = reinterpret_cast<const float *>(s0 + static_cast<size_t>(v) * s0_stride);
+        const float *wgt = reinterpret_cast<const float *>(s1 + static_cast<size_t>(v) * s1_stride);
+        const uint32_t *idx = reinterpret_cast<const uint32_t *>(s1 + static_cast<size_t>(v) * s1_stride + 16);
+        const float px = in[0], py = in[1], pz = in[2];
+        const float nx = in[3], ny = in[4], nz = in[5];
+        float op[3] = { 0.f, 0.f, 0.f };
+        float on[3] = { 0.f, 0.f, 0.f };
+        for (int i = 0; i < 4; i++) {
+            const float w = wgt[i];
+            if (w == 0.0f)
+                continue;
+            const float *m = mats + static_cast<size_t>(idx[i]) * 12; // 12 floats = 3x4 affine
+            for (int r = 0; r < 3; r++) {
+                const float r0 = m[r * 4 + 0], r1 = m[r * 4 + 1], r2 = m[r * 4 + 2], rt = m[r * 4 + 3];
+                op[r] += w * (r0 * px + r1 * py + r2 * pz + rt);
+                on[r] += w * (r0 * nx + r1 * ny + r2 * nz);
+            }
+        }
+        float *out = reinterpret_cast<float *>(outbuf + static_cast<size_t>(v) * out_stride);
+        out[0] = op[0]; out[1] = op[1]; out[2] = op[2];
+        out[3] = on[0]; out[4] = on[1]; out[5] = on[2];
+    };
+
+    if (indices_ptr) {
+        if (format == SCE_GXM_INDEX_FORMAT_U16) {
+            const uint16_t *ip = reinterpret_cast<const uint16_t *>(indices_ptr);
+            for (size_t i = 0; i < count; i++)
+                skin_vertex(ip[i]);
+        } else {
+            const uint32_t *ip = reinterpret_cast<const uint32_t *>(indices_ptr);
+            for (size_t i = 0; i < count; i++)
+                skin_vertex(ip[i]);
+        }
+    } else {
+        for (size_t v = 0; v < count; v++)
+            skin_vertex(static_cast<uint32_t>(v));
+    }
+
+    static std::once_flag once;
+    std::call_once(once, [&]() { LOG_INFO("[SKIN] CPU vertex-job skinning active (e.g. {} verts)", (int)count); });
+    return true;
+}
+
 void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format,
     Ptr<void> indices, size_t count, uint32_t instance_count, MemState &mem, const Config &config) {
     void *indices_ptr = indices.get(mem);
 
     context.check_for_macroblock_change(true);
+
+    // CPU emulation of GPU-skinning "vertex jobs". This game (and Unity titles in general) skin
+    // characters with a vertex program that loads bone matrices and WRITES the transformed
+    // position/normal back to a buffer via USSE STR. That requires GPU memory mapping, which on
+    // macOS/MoltenVK ends up crashing Apple's Metal shader compiler. Instead we recognize the
+    // shape of this shader and run linear-blend skinning on the CPU, writing the output buffer in
+    // guest memory; the subsequent normal MVP draw then renders the skinned mesh. This keeps
+    // memory mapping disabled and avoids the Metal compiler entirely.
+    if (try_cpu_vertex_job_skin(context, format, indices_ptr, count, mem))
+        return;
 
     if (!context.in_renderpass)
         context.start_render_pass();

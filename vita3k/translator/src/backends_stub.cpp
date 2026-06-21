@@ -15,24 +15,35 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
-#pragma once
+// Fallback OCR / translation backends for non-Apple platforms. These make the
+// screen-translation feature compile and run as a no-op everywhere; native
+// backends (Tesseract, raw-socket HTTP) can be added here later.
 
-#include <util/exit_code.h>
-#include <util/fs.h>
+#include <translator/net.h>
+#include <translator/ocr.h>
 
-#include <string>
-#include <vector>
+namespace translator::ocr {
 
-struct AppLaunchRequest;
-struct EmuEnvState;
+bool available() {
+    return false;
+}
 
-ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv);
-ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchRequest &launch_request);
-ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id);
-ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchRequest &launch_request);
-void toggle_texture_replacement(EmuEnvState &emuenv);
-void take_screenshot(EmuEnvState &emuenv);
+std::vector<TextRegion> recognize(const uint8_t *, uint32_t, uint32_t,
+    const Options &) {
+    return {};
+}
 
-// Screen translation: toggle the overlay (hotkey) and per-frame driver.
-void toggle_screen_translation(EmuEnvState &emuenv);
-void translator_tick(EmuEnvState &emuenv);
+} // namespace translator::ocr
+
+namespace translator::net {
+
+bool available(const Options &) {
+    return false;
+}
+
+std::vector<std::string> translate(const std::vector<std::string> &,
+    const Options &) {
+    return {};
+}
+
+} // namespace translator::net
