@@ -35,7 +35,17 @@ extern "C" {
 
 static bool format_support_surface_sync(SceGxmColorBaseFormat format) {
     // we use rgba16 to emulate this format, don't even try to convert it back for now
-    return format != SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10;
+    if (format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10)
+        return false;
+    // On GPUs lacking native packed-16 formats (Intel/AMD Macs) these surfaces are emulated with a
+    // 32-bit RGBA8 image; we don't convert that back to the guest's 16-bit layout, so skip sync to
+    // avoid a size-mismatched 32bpp->16bpp copy. Native packed-16 GPUs (Apple Silicon) keep sync.
+    if (!renderer::vulkan::get_packed16_support()
+        && (format == SCE_GXM_COLOR_BASE_FORMAT_U5U6U5
+            || format == SCE_GXM_COLOR_BASE_FORMAT_U1U5U5U5
+            || format == SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4))
+        return false;
+    return true;
 }
 
 static bool format_support_swizzle(SceGxmColorBaseFormat format) {

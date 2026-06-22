@@ -465,8 +465,13 @@ vk::Format translate_format(SceGxmColorBaseFormat format) {
 
     // packed formats
     case SCE_GXM_COLOR_BASE_FORMAT_U5U6U5:
-        // RG8 fallback (same 16-bit size) when the device lacks RGB565 (e.g. Intel/AMD Macs)
-        return s_support_packed16 ? vk::Format::eR5G6B5UnormPack16 : vk::Format::eR8G8Unorm;
+        if (!s_support_packed16)
+            LOG_INFO_ONCE("[packed16-surface] U5U6U5 (RGB565) color surface requested; emulating with RGBA8");
+        // When the device lacks RGB565 (e.g. Intel/AMD Macs) emulate with RGBA8 like U8U8U8 does.
+        // The previous RG8 fallback dropped the blue channel -> green/yellow tint + per-frame flicker
+        // (the unwritten "blue" bytes were undefined). RGBA8 keeps all channels. The 32-bit surface is
+        // not synced back to the guest's 16-bit layout (see format_support_surface_sync).
+        return s_support_packed16 ? vk::Format::eR5G6B5UnormPack16 : vk::Format::eR8G8B8A8Unorm;
     case SCE_GXM_COLOR_BASE_FORMAT_F11F11F10:
         return vk::Format::eB10G11R11UfloatPack32;
     case SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9:
@@ -478,11 +483,11 @@ vk::Format translate_format(SceGxmColorBaseFormat format) {
     case SCE_GXM_COLOR_BASE_FORMAT_U1U5U5U5:
         // TODO: we must use either eR5G5B5A1UnormPack16 or eA1R5G5B5UnormPack16 depending on the swizzle
         // also eR5G5B5A1UnormPack16 is not supported on all GPUs...
-        // RG8 fallback (same 16-bit size) when the device lacks packed 16-bit formats
-        return s_support_packed16 ? vk::Format::eA1R5G5B5UnormPack16 : vk::Format::eR8G8Unorm;
+        // RGBA8 fallback (keeps all channels) when the device lacks packed 16-bit formats
+        return s_support_packed16 ? vk::Format::eA1R5G5B5UnormPack16 : vk::Format::eR8G8B8A8Unorm;
     case SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4:
-        // RG8 fallback (same 16-bit size) when the device lacks packed 16-bit formats
-        return s_support_packed16 ? vk::Format::eR4G4B4A4UnormPack16 : vk::Format::eR8G8Unorm;
+        // RGBA8 fallback (keeps all channels) when the device lacks packed 16-bit formats
+        return s_support_packed16 ? vk::Format::eR4G4B4A4UnormPack16 : vk::Format::eR8G8B8A8Unorm;
     case SCE_GXM_COLOR_BASE_FORMAT_U2U10U10U10:
         // TODO: only ABGR or ARGB swizzle is supported with this format
         return vk::Format::eA2R10G10B10UnormPack32;

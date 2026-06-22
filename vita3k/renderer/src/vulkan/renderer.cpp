@@ -37,6 +37,7 @@
 #include <overlay/display_manager.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <mutex>
 #include <unordered_set>
 
@@ -932,13 +933,42 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
 
     bool use_high_accuracy = cfg.current_config.high_accuracy;
 
-    // shader interlock is more accurate but slower
-    if (features.support_shader_interlock && use_high_accuracy) {
-        LOG_INFO("Using shader interlock for accurate framebuffer fetch emulation");
+    // Framebuffer fetch (programmable blending) emulation path selection.
+    //
+    // Two paths exist:
+    //   * direct_fragcolor: a subpass input attachment. It is per-pixel COHERENT only when the GPU
+    //     exposes VK_EXT_rasterization_order_attachment_access (Apple Silicon, via Metal raster order
+    //     groups). Without that extension it is only an approximation: overlapping programmable-blend
+    //     geometry reads stale destination color -> wrong colors + frame-to-frame flicker in 3D scenes.
+    //   * shader interlock: per-pixel ordered, correct even without raster order access, but slower.
+    //
+    // We force shader interlock when high accuracy is requested, OR when the GPU lacks raster order
+    // access (so direct_fragcolor would be non-coherent) yet supports interlock. The latter is gated
+    // to Apple because Intel/AMD Macs are the concrete case where the non-coherent fallback visibly
+    // breaks 3D scenes; other platforms keep their existing default. Apple Silicon has raster order
+    // access, so it never takes this branch (and its features.support_shader_interlock is already
+    // false), meaning this whole block is a no-op there.
+    //
+    // Env override for A/B testing in a single build: V3K_FB_FETCH = "interlock" | "input".
+    bool want_interlock = features.support_shader_interlock && use_high_accuracy;
+    // NOTE: forcing interlock on raster-order-less Macs was tested and did NOT fix the 3D color/
+    // flicker issue (root cause was the packed-16 color-surface RG8 fallback, fixed separately), so
+    // we keep the original fast direct_fragcolor default. The env override below stays for A/B testing.
+    if (const char *fb_env = std::getenv("V3K_FB_FETCH")) {
+        const std::string_view fb{ fb_env };
+        if (fb == "interlock")
+            want_interlock = features.support_shader_interlock;
+        else if (fb == "input")
+            want_interlock = false;
+    }
+
+    if (want_interlock) {
+        LOG_INFO("Framebuffer fetch: shader interlock (accurate; high_accuracy={}, raster_order_access={})", use_high_accuracy, support_rasterized_order_access);
     } else {
         // We use subpass input to get something similar to direct fragcolor access (there is no difference for the shader)
         features.direct_fragcolor = true;
         features.support_shader_interlock = false;
+        LOG_INFO("Framebuffer fetch: subpass input / direct_fragcolor (coherent={})", support_rasterized_order_access);
     }
 
     // texture viewport is faster but not entirely accurate
@@ -990,6 +1020,18 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
     pipeline_cache.init(support_rasterized_order_access);
 
     texture_cache.init(true, texture_folder(), game_id);
+
+    // One-shot capability dump to compare machines (Apple Silicon vs Intel/AMD Mac) for the 3D-scene
+    // color/flicker investigation. raster_order_access=1 (Apple Silicon) -> coherent framebuffer
+    // fetch; =0 (Intel/AMD Mac) -> shader interlock is now used instead of the non-coherent fallback.
+    // (packed-16 RGB support is logged separately in VKTextureCache::init.)
+    LOG_INFO("[gpu-caps] device='{}' raster_order_access={} shader_interlock={} direct_fragcolor={} texture_viewport={} deep_stencil={}",
+        physical_device_properties.deviceName.data(),
+        support_rasterized_order_access,
+        features.support_shader_interlock,
+        features.direct_fragcolor,
+        features.use_texture_viewport,
+        vk::to_string(deep_stencil_use));
 }
 
 void VKState::cleanup() {

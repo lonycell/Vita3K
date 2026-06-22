@@ -602,12 +602,6 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
         .dstAccessMask = vk::AccessFlagBits::eColorAttachmentRead | vk::AccessFlagBits::eDepthStencilAttachmentRead
     };
 
-    if (state.features.support_shader_interlock && no_color) {
-        // we must wait for the previous shaders to be done
-        dependencies[1].dstStageMask = vk::PipelineStageFlagBits::eFragmentShader;
-        dependencies[1].dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
-    }
-
     // if an attachment is sampled from, we want it to be done before the next render pass fragment shader
     dependencies[1] = {
         .srcSubpass = VK_SUBPASS_EXTERNAL,
@@ -617,6 +611,15 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
         .srcAccessMask = vk::AccessFlagBits::eShaderRead,
         .dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eDepthStencilAttachmentWrite
     };
+
+    // NOTE: these two amendments must come AFTER the assignment above. They were previously written
+    // before it and silently clobbered (the no_color barrier never took effect), which left the
+    // shader-interlock framebuffer-fetch pass under-synchronized.
+    if (state.features.support_shader_interlock && no_color) {
+        // we must wait for the previous shaders to be done before this interlock-only pass
+        dependencies[1].dstStageMask = vk::PipelineStageFlagBits::eFragmentShader;
+        dependencies[1].dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite;
+    }
 
     if (state.features.support_shader_interlock && !no_color) {
         // we must wait for the shader interlock shader to be done

@@ -26,6 +26,7 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <mutex>
 
 namespace renderer::vulkan {
@@ -369,6 +370,7 @@ static bool try_cpu_vertex_job_skin(VKContext &context, SceGxmIndexFormat format
     const uint32_t s0_stride = vprog.streams[0].stride;
     const uint32_t s1_stride = vprog.streams[1].stride;
     constexpr uint32_t out_stride = 24; // position float3 + normal float3
+    constexpr uint32_t kMaxBones = 4096; // sanity cap so a mis-detected draw can't OOB-read the matrix block
 
     const auto skin_vertex = [&](uint32_t v) {
         const float *in = reinterpret_cast<const float *>(s0 + static_cast<size_t>(v) * s0_stride);
@@ -380,7 +382,7 @@ static bool try_cpu_vertex_job_skin(VKContext &context, SceGxmIndexFormat format
         float on[3] = { 0.f, 0.f, 0.f };
         for (int i = 0; i < 4; i++) {
             const float w = wgt[i];
-            if (w == 0.0f)
+            if (w == 0.0f || idx[i] >= kMaxBones)
                 continue;
             const float *m = mats + static_cast<size_t>(idx[i]) * 12; // 12 floats = 3x4 affine
             for (int r = 0; r < 3; r++) {
@@ -393,6 +395,47 @@ static bool try_cpu_vertex_job_skin(VKContext &context, SceGxmIndexFormat format
         out[0] = op[0]; out[1] = op[1]; out[2] = op[2];
         out[3] = on[0]; out[4] = on[1]; out[5] = on[2];
     };
+
+    const auto index_at = [&](size_t i) -> uint32_t {
+        if (!indices_ptr)
+            return static_cast<uint32_t>(i);
+        return (format == SCE_GXM_INDEX_FORMAT_U16)
+            ? reinterpret_cast<const uint16_t *>(indices_ptr)[i]
+            : reinterpret_cast<const uint32_t *>(indices_ptr)[i];
+    };
+
+    // Confirm stream 1 really carries normalized bone weights + sane indices for THIS draw, not just
+    // a shader whose attribute shape happens to match. Genuine skinning weights sum to ~1. This is the
+    // key gate that fixes the c1c65cf9 regression: other BUFFER_STORE shaders (and any draw bound while
+    // the global block addresses are stale) fail this check, so we neither skip nor corrupt their draws.
+    {
+        const size_t sample_n = std::min<size_t>(count, 8);
+        int valid = 0;
+        for (size_t i = 0; i < sample_n; i++) {
+            const uint32_t v = index_at(i);
+            const float *wgt = reinterpret_cast<const float *>(s1 + static_cast<size_t>(v) * s1_stride);
+            const uint32_t *idx = reinterpret_cast<const uint32_t *>(s1 + static_cast<size_t>(v) * s1_stride + 16);
+            float sum = 0.f;
+            bool ok = true;
+            for (int k = 0; k < 4; k++) {
+                const float w = wgt[k];
+                if (!(w >= -0.02f && w <= 1.02f))
+                    ok = false;
+                if (idx[k] >= kMaxBones)
+                    ok = false;
+                sum += w;
+            }
+            if (ok && sum > 0.85f && sum < 1.15f)
+                valid++;
+        }
+        if (sample_n == 0 || valid * 2 < static_cast<int>(sample_n)) {
+            // Shape matched but stream 1 isn't normalized bone weights — diagnostic to tell apart
+            // "validation too strict (character would vanish)" from "correctly skipped a non-skinning draw".
+            static std::once_flag rej_once;
+            std::call_once(rej_once, [&] { LOG_INFO("[SKIN] store-shader matched shape but stream1 != bone weights (sampled {}, valid {}) — using normal draw", (int)sample_n, valid); });
+            return false; // not a real skinning draw — let the normal GPU path handle it
+        }
+    }
 
     if (indices_ptr) {
         if (format == SCE_GXM_INDEX_FORMAT_U16) {
@@ -427,7 +470,18 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     // shape of this shader and run linear-blend skinning on the CPU, writing the output buffer in
     // guest memory; the subsequent normal MVP draw then renders the skinned mesh. This keeps
     // memory mapping disabled and avoids the Metal compiler entirely.
-    if (try_cpu_vertex_job_skin(context, format, indices_ptr, count, mem))
+    //
+    // Default ON. An earlier version (c1c65cf9) regressed other rendering because the match was too
+    // loose: non-skinning BUFFER_STORE draws were intercepted and skipped (objects vanished) and
+    // skinned output was written through stale GLOBAL block addresses (2D NPC body parts vanished,
+    // 3D floor went black). try_cpu_vertex_job_skin now validates that stream 1 actually holds
+    // normalized bone weights + sane indices before acting, so only genuine skinning draws are
+    // handled and everything else falls through to the normal GPU path. Set V3K_CPU_SKIN=0 to disable.
+    static const bool cpu_skin_enabled = [] {
+        const char *e = std::getenv("V3K_CPU_SKIN");
+        return !e || e[0] != '0';
+    }();
+    if (cpu_skin_enabled && try_cpu_vertex_job_skin(context, format, indices_ptr, count, mem))
         return;
 
     if (!context.in_renderpass)
